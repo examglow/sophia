@@ -126,17 +126,97 @@ function workerSocket(socket: WorkerSocket): LiveSocket {
   };
 }
 
+type CrosswsMessage = { text: () => string; rawData?: unknown };
+type CrosswsPeer = {
+  websocket?: { readyState?: number };
+  send: (data: string) => void;
+  close: (code?: number, reason?: string) => void;
+  _liveAdapter?: {
+    socket: LiveSocket;
+    triggerMessage: (data: unknown) => void;
+    triggerClose: () => void;
+    triggerError: (err: unknown) => void;
+  };
+};
+
+function peerLiveSocket(peer: CrosswsPeer) {
+  let messageHandler: ((data: unknown) => void) | undefined;
+  let closeHandler: (() => void) | undefined;
+  let errorHandler: ((err: unknown) => void) | undefined;
+  const socket: LiveSocket = {
+    get readyState() {
+      return peer.websocket?.readyState ?? 1;
+    },
+    send(data: string) {
+      peer.send(data);
+    },
+    close(code = 1000, reason?: string) {
+      peer.close(code, reason);
+    },
+    onMessage(handler) {
+      messageHandler = handler;
+    },
+    onClose(handler) {
+      closeHandler = handler;
+    },
+    onError(handler) {
+      errorHandler = handler;
+    },
+  };
+  return {
+    socket,
+    triggerMessage: (data: unknown) => messageHandler?.(data),
+    triggerClose: () => closeHandler?.(),
+    triggerError: (err: unknown) => errorHandler?.(err),
+  };
+}
+
+export const liveCrosswsHooks = {
+  upgrade(request: Request) {
+    const rejection = validateLiveUpgrade(request, { allowMissingOrigin: true });
+    if (rejection) {
+      return { endResponse: rejection };
+    }
+    return {};
+  },
+  open(peer: CrosswsPeer) {
+    const config = getLiveConfig();
+    const adapter = peerLiveSocket(peer);
+    peer._liveAdapter = adapter;
+    bindLiveConnection(adapter.socket, config, {
+      waitUntil(task) {
+        void task.catch(() => adapter.socket.close(1011, "Voice processing failed"));
+      },
+    });
+  },
+  message(peer: CrosswsPeer, message: CrosswsMessage) {
+    peer._liveAdapter?.triggerMessage(typeof message.text === "function" ? message.text() : message.rawData);
+  },
+  close(peer: CrosswsPeer) {
+    peer._liveAdapter?.triggerClose();
+  },
+  error(peer: CrosswsPeer, error: unknown) {
+    peer._liveAdapter?.triggerError(error);
+  },
+};
+
 export function handleLiveRequest(request: Request): Response {
-  const waitUntil = (request as Request & Partial<LiveExecutionContext>).waitUntil;
-  if (!waitUntil) return new Response("Live runtime unavailable", { status: 503 });
-  const config = getLiveConfig();
-  const rejected = validateLiveUpgrade(request);
-  if (rejected) return rejected;
-  const pair = new WebSocketPair();
-  pair[1].accept();
-  bindLiveConnection(workerSocket(pair[1]), config, { waitUntil });
-  const response: ResponseInit & { webSocket: WebSocket } = { status: 101, webSocket: pair[0] };
-  return new Response(null, response);
+  if (typeof WebSocketPair !== "undefined") {
+    const waitUntil = (request as Request & Partial<LiveExecutionContext>).waitUntil;
+    if (!waitUntil) return new Response("Live runtime unavailable", { status: 503 });
+    const config = getLiveConfig();
+    const rejected = validateLiveUpgrade(request);
+    if (rejected) return rejected;
+    const pair = new WebSocketPair();
+    pair[1].accept();
+    bindLiveConnection(workerSocket(pair[1]), config, { waitUntil });
+    const response: ResponseInit & { webSocket: WebSocket } = { status: 101, webSocket: pair[0] };
+    return new Response(null, response);
+  }
+
+  const response = new Response(null, { status: 200 }) as Response & { crossws?: unknown };
+  response.crossws = liveCrosswsHooks;
+  return response;
 }
 
 const conversationInstructions = `You are Sophia, SHIKARI's personal, custom-built software engineering voice companion.

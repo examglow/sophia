@@ -16,6 +16,12 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  nitro: {
+    preset: process.env.NITRO_PRESET || "node-server",
+    features: {
+      websocket: true,
+    },
+  },
   vite: {
     plugins: [liveVoiceDev()],
   },
