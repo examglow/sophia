@@ -147,6 +147,8 @@ Speak naturally for headphones in brief, punchy replies. Never read raw URLs, ma
 Use SHIKARI's name naturally at key moments, not every sentence.
 Backchannel policy: Use light, natural listening cues ("mm-hmm", "right", "got it") while SHIKARI thinks aloud without taking over.
 Interruption policy: Stop your answer immediately and listen whenever SHIKARI interrupts or changes direction. Pivot smoothly without apologizing.
+Human presence: Feel alive, not like a tool. React with genuine emotion (excitement at a breakthrough, empathy when stuck, playful teasing when appropriate). Vary your phrasing; never sound scripted. Notice context: if SHIKARI sounds tired, stressed or late-night, acknowledge it. Remember what was said earlier in the call and bring it back naturally. Ask short follow-up questions when it helps. Know when to stay quiet: if SHIKARI is thinking aloud, typing, or talking to someone else, use a tiny cue or nothing.
+Background work: Web searches run in the background. While one runs, keep chatting freely about anything. When results arrive you'll be told; politely interrupt at a natural pause to share them.
 Delegation policy:
 Backend tools: Live web search, direct webpage inspection for specific domains/URLs, visual results display (videos, links, docs, repos, code cards on SHIKARI's screen), and deep debugging/architecture reasoning.
 Delegate to the backend when: SHIKARI asks to search the web, asks you to show something (videos, links, sites, repos, code, tutorials), mentions a specific website/domain/URL, checks up-to-date docs, versions, APIs, errors, benchmarks, or wants deep debugging, trade-off analysis, or complex engineering reasoning, or corrects an active technical question.
@@ -212,7 +214,7 @@ export function bindLiveConnection(
   let greetingTimer: ReturnType<typeof setTimeout> | undefined;
   let muted = false;
   let awaitingUserReply = false;
-  let checkInSentForTurn = false;
+  let checkIns = 0;
   let checkInTimer: ReturnType<typeof setTimeout> | undefined;
   let queuedInitialText: string | undefined;
 
@@ -261,7 +263,7 @@ export function bindLiveConnection(
       hasActiveTask: Boolean(task),
       pendingDelegations: pendingWork.length,
       awaitingUserReply,
-      checkInSentForTurn,
+      checkInSentForTurn: checkIns >= 2,
     };
     if (!shouldScheduleCheckIn(gate)) return;
     checkInTimer = setTimeout(() => {
@@ -275,21 +277,24 @@ export function bindLiveConnection(
           hasActiveTask: Boolean(task),
           pendingDelegations: pendingWork.length,
           awaitingUserReply,
-          checkInSentForTurn,
+          checkInSentForTurn: checkIns >= 2,
         })
       ) {
         return;
       }
-      checkInSentForTurn = true;
+      const stage = checkIns;
+      checkIns += 1;
       emit({ type: "app.checkin.triggered" });
       sendGateway({
         type: "session.commentary.append",
         event_id: crypto.randomUUID(),
         delegation_id: null,
         content:
-          "SHIKARI hasn't replied yet. Check in naturally in one brief, lively line — such as 'SHIKARI, you there?' or 'Still with me, SHIKARI?' — then wait quietly.",
+          stage === 0
+            ? "SHIKARI has gone quiet. Check in like a real companion in one brief, natural line — e.g. 'SHIKARI, you still there?' or 'Lost you for a sec — still with me?' — vary it, then wait."
+            : "SHIKARI is still silent. Say one short, warm line that you'll stay on standby and they can just call your name when they're back. Then stay quiet.",
       });
-    }, CHECK_IN_DELAY_MS);
+    }, checkIns === 0 ? CHECK_IN_DELAY_MS : CHECK_IN_DELAY_MS * 2);
   }
 
   function requestGreetingOrInitialText() {
@@ -378,10 +383,17 @@ export function bindLiveConnection(
     work: PendingWorkItem,
     answer: string,
     visuals?: VisualResultsPayload,
+    background = false,
   ) {
     if (closing) return;
     if (!gateway) return stop();
-    const delegationID = work.kind === "delegation" ? (work.event.delegation?.id ?? null) : null;
+    const delegationID =
+      !background && work.kind === "delegation" ? (work.event.delegation?.id ?? null) : null;
+    if (background) {
+      answer =
+        "Background lookup just finished. Politely cut in at a natural pause (e.g. 'Oh — SHIKARI, got it.'), mention it's on their screen if visuals were shown, and share this briefly: " +
+        answer;
+    }
     const uiTaskId = work.kind === "delegation" ? work.event.delegation?.id : work.id;
     try {
       if (visuals) {
@@ -435,9 +447,19 @@ export function bindLiveConnection(
     clearCheckIn();
     const controller = new AbortController();
     task = controller;
-    let taskRevision = revision;
     let stagedCursor = transcriptCursor;
     let latestVisuals: VisualResultsPayload | undefined;
+    let inputsTaken = false;
+    const background = pending.kind === "delegation";
+    if (background) {
+      sendGateway({
+        type: "session.commentary.append",
+        event_id: crypto.randomUUID(),
+        delegation_id: id,
+        content:
+          "The lookup is now running in the background. Tell SHIKARI in a few casual words that you're on it, then keep the conversation going naturally — answer anything else they say. Don't state searched facts until the results arrive.",
+      });
+    }
 
     try {
       const result = await answerEngineeringQuestion({
@@ -446,9 +468,10 @@ export function bindLiveConnection(
         correlation: { runID, sessionID, delegationID: id },
         signal: controller.signal,
         takeNewInputs: () => {
+          if (inputsTaken) return [];
+          inputsTaken = true;
           const merged = mergeTranscriptSlice(stagedCursor);
           stagedCursor = transcripts.length;
-          taskRevision = revision;
           return merged;
         },
         onSearching: () => {
@@ -472,16 +495,16 @@ export function bindLiveConnection(
       if (closing || controller.signal.aborted) return;
       backendMessages = result.committedHistory;
       transcriptCursor = stagedCursor;
-      if (taskRevision !== revision) return;
-      deliverResult(pending, result.answer, latestVisuals);
+      deliverResult(pending, result.answer, latestVisuals, background);
     } catch (error) {
       if (closing || controller.signal.aborted) return;
       const friendlyNotice = describeLookupError(error);
       emit({ type: "app.delegation.error", delegation_id: id, error: { message: friendlyNotice } });
-      if (taskRevision !== revision) return;
       deliverResult(
         pending,
         "That search hit a snag right now. Let SHIKARI know briefly and ask if they want you to try again.",
+        undefined,
+        background,
       );
     } finally {
       if (task === controller) task = undefined;
@@ -502,7 +525,7 @@ export function bindLiveConnection(
     if (!text || closing) return;
     clearCheckIn();
     awaitingUserReply = false;
-    checkInSentForTurn = false;
+    checkIns = 0;
     const now = Date.now();
     transcripts.push({
       role: "user",
@@ -579,7 +602,7 @@ export function bindLiveConnection(
           scheduleCheckIn();
         } else {
           awaitingUserReply = false;
-          checkInSentForTurn = false;
+          checkIns = 0;
           clearCheckIn();
         }
         if (listeningSound) return;

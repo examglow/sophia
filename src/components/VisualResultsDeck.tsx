@@ -9,8 +9,15 @@ type VisualResultsDeckProps = {
 };
 
 function MediaPreview({ item, featured }: { item: VisualResultItem; featured: boolean }) {
-  const [broken, setBroken] = useState(false);
-  const showImage = Boolean(item.imageUrl) && !broken;
+  const sources = [
+    item.imageUrl,
+    item.url && /^https?:\/\//.test(item.url)
+      ? `https://image.thum.io/get/width/1200/crop/760/noanimate/${item.url}`
+      : undefined,
+  ].filter((value): value is string => Boolean(value));
+  const [attempt, setAttempt] = useState(0);
+  const src = sources[attempt];
+  const showImage = Boolean(src);
 
   return (
     <div
@@ -20,11 +27,12 @@ function MediaPreview({ item, featured }: { item: VisualResultItem; featured: bo
     >
       {showImage ? (
         <img
-          src={item.imageUrl}
+          key={src}
+          src={src}
           alt={item.title}
           loading="lazy"
-          onError={() => setBroken(true)}
-          className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.03]"
+          onError={() => setAttempt((n) => n + 1)}
+          className="h-full w-full object-cover object-top transition-transform duration-500 group-hover:scale-[1.03]"
         />
       ) : (
         <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-4 text-center">
