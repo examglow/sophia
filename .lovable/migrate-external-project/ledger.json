@@ -1,0 +1,102 @@
+{
+  "capabilities": [
+    {
+      "capability": "code",
+      "source": "github:examglow/shikari-s-coding-companion",
+      "outcome": "migrate",
+      "status": "in_progress",
+      "next_action": "Import TanStack Start app files, Live voice relay, ReactiveSphere UI, and Vite/Cloudflare adapters into project"
+    },
+    {
+      "capability": "schema",
+      "source": "absent",
+      "outcome": "not_applicable",
+      "status": "verified",
+      "next_action": "No database schema detected in source repository"
+    },
+    {
+      "capability": "records",
+      "source": "absent",
+      "outcome": "not_applicable",
+      "status": "verified",
+      "next_action": "No stored records detected in source repository"
+    },
+    {
+      "capability": "auth_identities",
+      "source": "absent",
+      "outcome": "not_applicable",
+      "status": "verified",
+      "next_action": "Public voice companion with no user auth"
+    },
+    {
+      "capability": "authorization",
+      "source": "origin-checked WebSocket upgrade",
+      "outcome": "preserve",
+      "status": "in_progress",
+      "next_action": "Preserve strict hosted origin validation and dev Vite adapter"
+    },
+    {
+      "capability": "uploaded_file_bytes",
+      "source": "absent",
+      "outcome": "not_applicable",
+      "status": "verified",
+      "next_action": "No uploaded storage buckets in source repository"
+    },
+    {
+      "capability": "external_providers",
+      "source": "@lovable.dev/ai-gateway (Live + Responses web_search + fetch_webpage)",
+      "outcome": "preserve_and_fix",
+      "status": "in_progress",
+      "next_action": "Preserve Lovable AI Gateway Live and Responses models, repair web search and webpage extraction, add text mode & visual results"
+    },
+    {
+      "capability": "public_endpoints",
+      "source": "/api/live WebSocket relay",
+      "outcome": "preserve",
+      "status": "in_progress",
+      "next_action": "Wire /api/live in src/server.ts and live-vite-plugin.ts"
+    },
+    {
+      "capability": "callbacks",
+      "source": "absent",
+      "outcome": "not_applicable",
+      "status": "verified",
+      "next_action": "No external callbacks"
+    },
+    {
+      "capability": "webhooks",
+      "source": "absent",
+      "outcome": "not_applicable",
+      "status": "verified",
+      "next_action": "No webhooks"
+    },
+    {
+      "capability": "schedules",
+      "source": "absent",
+      "outcome": "not_applicable",
+      "status": "verified",
+      "next_action": "No scheduled jobs"
+    },
+    {
+      "capability": "secrets",
+      "source": "LOVABLE_API_KEY (managed)",
+      "outcome": "preserve",
+      "status": "verified",
+      "next_action": "Managed LOVABLE_API_KEY present in server environment"
+    },
+    {
+      "capability": "cutover",
+      "source": "github import",
+      "outcome": "in_progress",
+      "status": "in_progress",
+      "next_action": "Verify preview and publish readiness"
+    },
+    {
+      "capability": "verification",
+      "source": "vitest + Playwright + live web search check",
+      "outcome": "pending",
+      "status": "pending",
+      "next_action": "Run unit tests, verify web search, text input, visual cards, and live preview"
+    }
+  ]
+}
