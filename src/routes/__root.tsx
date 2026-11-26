@@ -81,13 +81,13 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "AETHER — Live Coding Voice Companion" },
+      { title: "Sophia — Live Coding Voice Companion" },
       {
         name: "description",
         content:
           "Reactive live voice and text engineering companion with web search and visual result cards.",
       },
-      { property: "og:title", content: "AETHER — Live Coding Voice Companion" },
+      { property: "og:title", content: "Sophia — Live Coding Voice Companion" },
       {
         property: "og:description",
         content:

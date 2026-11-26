@@ -21,7 +21,7 @@ function MediaPreview({ item, featured }: { item: VisualResultItem; featured: bo
 
   return (
     <div
-      className={`relative w-full overflow-hidden rounded-xl aether-thumb-fallback ${
+      className={`relative w-full overflow-hidden rounded-xl sophia-thumb-fallback ${
         featured ? "aspect-[16/9]" : "aspect-[16/10]"
       }`}
     >
@@ -74,7 +74,7 @@ function CodeCard({ item }: { item: VisualResultItem }) {
   };
 
   return (
-    <article className="aether-visual-card flex flex-col gap-3 rounded-2xl p-4">
+    <article className="sophia-visual-card flex flex-col gap-3 rounded-2xl p-4">
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">
           <h3 className="truncate text-sm font-semibold text-foreground">{item.title}</h3>
@@ -107,7 +107,7 @@ function LinkOrVideoCard({ item, featured }: { item: VisualResultItem; featured:
       href={item.url}
       target="_blank"
       rel="noopener noreferrer"
-      className={`aether-visual-card group flex flex-col gap-2.5 rounded-2xl transition-all duration-300 hover:border-primary/40 hover:bg-card/85 ${
+      className={`sophia-visual-card group flex flex-col gap-2.5 rounded-2xl transition-all duration-300 hover:border-primary/40 hover:bg-card/85 ${
         featured ? "p-3.5 sm:p-4" : "p-2.5 sm:p-3"
       }`}
     >

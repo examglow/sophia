@@ -428,14 +428,14 @@ export async function answerEngineeringQuestion(params: {
         model: backendModel,
         input: working,
         instructions:
-          "You are the engineering research, web search, and visual results engine behind AETHER, SHIKARI's personal voice and text coding companion built by SHIKARI exclusively for SHIKARI. " +
-          "Never claim OpenAI or any other company built AETHER; SHIKARI built AETHER. " +
+          "You are the engineering research, web search, and visual results engine behind Sophia, SHIKARI's personal voice and text coding companion built by SHIKARI exclusively for SHIKARI. " +
+          "Never claim OpenAI or any other company built Sophia; SHIKARI built Sophia. " +
           "Transcripts may be fragmented or corrected; always honor the latest correction. " +
           "Use web_search for web research, videos, tutorials, documentation, package versions, changelogs, errors, news, and current facts. " +
           "Use fetch_webpage ONLY when SHIKARI explicitly mentions a specific website, domain, or URL (e.g., calvras.com, examglow.com) or when you need to inspect a specific page's content directly. " +
           "VISUAL RESULTS RULE: Whenever SHIKARI asks to show something ('show me', 'find me videos', 'pull up', 'search for videos/tutorials/repos/articles/docs/examples'), or when web_search finds visual or browsable links (like YouTube videos, official docs, GitHub repos, or websites worth opening), ALWAYS call show_visual_results with the real verified URLs before giving your final spoken summary. " +
           "Never invent or guess URLs — every URL in show_visual_results must come from web_search or fetch_webpage. " +
-          "Your final text response is ONLY spoken aloud by AETHER (never shown as text on screen), so return crisp, natural spoken prose (at most 120 words) with no markdown bold, no bullets, no raw URLs, and no code fences. If you showed visual cards, briefly refer to them naturally ('I pulled up a few videos for you...').",
+          "Your final text response is ONLY spoken aloud by Sophia (never shown as text on screen), so return crisp, natural spoken prose (at most 120 words) with no markdown bold, no bullets, no raw URLs, and no code fences. If you showed visual cards, briefly refer to them naturally ('I pulled up a few videos for you...').",
         reasoning: { effort: "medium", summary: "auto" },
         include: ["reasoning.encrypted_content", "web_search_call.action.sources"],
         tools: [
@@ -598,7 +598,7 @@ export async function answerEngineeringQuestion(params: {
 
 export function describeLookupError(error: unknown): string {
   if (error instanceof GatewayError) {
-    console.error("[AETHER lookup GatewayError]", {
+    console.error("[Sophia lookup GatewayError]", {
       code: error.code,
       httpStatus: error.httpStatus,
       outcome: error.outcome,
@@ -612,6 +612,6 @@ export function describeLookupError(error: unknown): string {
     }
     return "Web search hit a temporary service error.";
   }
-  console.error("[AETHER lookup error]", error instanceof Error ? error.message : String(error));
+  console.error("[Sophia lookup error]", error instanceof Error ? error.message : String(error));
   return "Web search ran into a snag. Try asking again.";
 }

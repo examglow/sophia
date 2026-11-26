@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Keyboard, Mic, MicOff, PhoneOff, Send } from "lucide-react";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
-import { ReactiveSphere, type SphereMode } from "@/components/ReactiveSphere";
+import { ReactiveWave, type WaveMode } from "@/components/ReactiveWave";
 import { VisualResultsDeck } from "@/components/VisualResultsDeck";
 import { useLiveVoice, type LiveEvent } from "@/hooks/use-live-voice";
 import type { VisualResultsPayload } from "@/lib/visual-results";
@@ -10,10 +10,10 @@ import type { VisualResultsPayload } from "@/lib/visual-results";
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "AETHER — Shikari's Coding Companion" },
+      { title: "Sophia — Shikari's Coding Companion" },
       { name: "description", content: "A live voice AI coding companion with web search and visual results." },
-      { property: "og:title", content: "AETHER — Shikari's Coding Companion" },
-      { property: "og:description", content: "Talk to AETHER: live voice, web search and visual result cards." },
+      { property: "og:title", content: "Sophia — Shikari's Coding Companion" },
+      { property: "og:description", content: "Talk to Sophia: live voice, web search and visual result cards." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
@@ -65,7 +65,7 @@ function Index() {
     return () => clearInterval(id);
   }, [voice.status, voice.getAudioLevels]);
 
-  const mode: SphereMode =
+  const mode: WaveMode =
     voice.status === "connecting"
       ? "connecting"
       : voice.status === "stopping"
@@ -92,37 +92,20 @@ function Index() {
     setDraft("");
   };
 
-  const status =
-    voice.status === "connecting"
-      ? "Connecting…"
-      : voice.status === "connected"
-        ? mode === "searching"
-          ? "Searching the web…"
-          : mode === "thinking"
-            ? "Thinking…"
-            : mode === "speaking"
-              ? "Speaking"
-              : voice.muted
-                ? "Muted"
-                : "Listening"
-        : "Tap the sphere to talk";
-
   return (
     <main className="relative flex min-h-screen flex-col items-center justify-center gap-8 bg-background px-4 py-10 font-sans text-foreground">
       <header className="absolute left-6 top-6 flex items-center gap-2">
         <span className="h-2 w-2 rounded-full bg-primary" />
-        <h1 className="font-display text-sm font-medium tracking-[0.3em]">AETHER</h1>
+        <h1 className="font-display text-sm font-medium tracking-[0.3em]">SOPHIA</h1>
       </header>
 
-      <ReactiveSphere
+      <ReactiveWave
         mode={mode}
         canWake={!live}
         compact={Boolean(visuals)}
         onWake={wake}
         getAudioLevels={voice.getAudioLevels}
       />
-
-      <p className="font-mono text-xs uppercase tracking-[0.25em] text-muted-foreground">{status}</p>
 
       {(voice.error || notice) && (
         <p role="alert" className="max-w-md text-center text-sm text-destructive">
@@ -142,8 +125,8 @@ function Index() {
           <input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            placeholder="Type to AETHER…"
-            aria-label="Message AETHER"
+            placeholder="Type to Sophia…"
+            aria-label="Message Sophia"
             className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
           />
           <button type="submit" aria-label="Send" className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-primary text-primary-foreground">

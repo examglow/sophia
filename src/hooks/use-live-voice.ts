@@ -363,18 +363,18 @@ function createLiveVoice(options: LiveOptions) {
   function reportUnexpectedClosure(reason?: string) {
     if (state === "stopping" || state === "closed") return;
     const messages: Record<string, string> = {
-      startup_timeout: "Voice startup timed out. Tap the sphere to retry.",
-      initial_heartbeat_timeout: "Voice media did not connect. Tap the sphere to retry.",
-      heartbeat_timeout: "Voice connection was lost. Tap the sphere to retry.",
-      gateway_shutdown: "The voice service restarted. Tap the sphere to reconnect.",
+      startup_timeout: "Voice startup timed out. Tap to retry.",
+      initial_heartbeat_timeout: "Voice media did not connect. Tap to retry.",
+      heartbeat_timeout: "Voice connection was lost. Tap to retry.",
+      gateway_shutdown: "The voice service restarted. Tap to reconnect.",
       inactivity_timeout: "The voice call ended after inactivity.",
-      duration_limit: "The voice call reached its duration limit. Tap the sphere to continue.",
+      duration_limit: "The voice call reached its duration limit. Tap to continue.",
     };
     options.onEvent({
       type: "app.error",
       error: {
         message:
-          messages[reason ?? ""] ?? "The voice call ended unexpectedly. Tap the sphere to retry.",
+          messages[reason ?? ""] ?? "The voice call ended unexpectedly. Tap to retry.",
       },
     });
   }
@@ -420,7 +420,7 @@ function createLiveVoice(options: LiveOptions) {
     answerReceived = true;
     clearTimeout(deadline);
     deadline = setTimeout(
-      () => fail("Voice media did not connect within 12 seconds. Tap the sphere to retry."),
+      () => fail("Voice media did not connect within 12 seconds. Tap to retry."),
       12_000,
     );
     await peer.setRemoteDescription({ type: "answer", sdp: event.transport.sdp });
@@ -477,7 +477,7 @@ function createLiveVoice(options: LiveOptions) {
       });
       connection.addEventListener("connectionstatechange", () => {
         if (connection.connectionState === "failed") {
-          fail("Voice media connection failed. Tap the sphere to retry.");
+          fail("Voice media connection failed. Tap to retry.");
         } else if (connection.connectionState === "closed") {
           fail("Voice media connection closed");
         } else activate();
