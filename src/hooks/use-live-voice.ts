@@ -184,7 +184,6 @@ function sampleBands(analyser: AnalyserNode, buffer: Uint8Array): number[] {
   return out;
 }
 
-// Convert base64 string to Uint8Array
 function base64ToUint8(base64: string): Uint8Array {
   const binaryString = atob(base64);
   const bytes = new Uint8Array(binaryString.length);
@@ -194,7 +193,6 @@ function base64ToUint8(base64: string): Uint8Array {
   return bytes;
 }
 
-// Convert ArrayBuffer to base64 string
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   let binary = "";
   const bytes = new Uint8Array(buffer);
@@ -204,15 +202,35 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+// Downsample to 16kHz PCM16 for Google Gemini
+function downsampleTo16k(input: Float32Array, inputSampleRate: number): Int16Array {
+  if (inputSampleRate === 16000) {
+    const pcm = new Int16Array(input.length);
+    for (let i = 0; i < input.length; i++) {
+      const s = Math.max(-1, Math.min(1, input[i] ?? 0));
+      pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return pcm;
+  }
+  const ratio = inputSampleRate / 16000;
+  const newLength = Math.round(input.length / ratio);
+  const result = new Int16Array(newLength);
+  for (let i = 0; i < newLength; i++) {
+    const index = Math.min(Math.round(i * ratio), input.length - 1);
+    const s = Math.max(-1, Math.min(1, input[index] ?? 0));
+    result[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return result;
+}
+
 function createLiveVoice(options: LiveOptions) {
   let state: "idle" | "starting" | "active" | "stopping" | "closed" = "idle";
   let socket: WebSocket | undefined;
   let microphone: MediaStream | undefined;
   let muted = options.startMuted;
 
-  // Web Audio Contexts
-  let micAudioCtx: AudioContext | undefined;
-  let playAudioCtx: AudioContext | undefined;
+  // Single shared AudioContext for rock-solid sync and zero Web Audio mismatch
+  let audioCtx: AudioContext | undefined;
   let inputAnalyser: AnalyserNode | undefined;
   let outputAnalyser: AnalyserNode | undefined;
   let inputTimeBuf: Uint8Array | undefined;
@@ -221,6 +239,11 @@ function createLiveVoice(options: LiveOptions) {
 
   let scheduledPlaybackTime = 0;
   let activeSources: AudioBufferSourceNode[] = [];
+
+  // Speech utterance buffer & Voice Activity Detection (VAD)
+  const speechChunks: Int16Array[] = [];
+  let isSpeaking = false;
+  let speechSilenceTimer: ReturnType<typeof setTimeout> | undefined;
 
   function send(event: object) {
     if (socket?.readyState === WebSocket.OPEN) {
@@ -240,11 +263,26 @@ function createLiveVoice(options: LiveOptions) {
     return { input, output, bands };
   }
 
+  function stopAllPlayback() {
+    for (const source of activeSources) {
+      try {
+        source.stop();
+        source.disconnect();
+      } catch {
+        // already stopped
+      }
+    }
+    activeSources = [];
+    if (audioCtx) {
+      scheduledPlaybackTime = audioCtx.currentTime;
+    }
+  }
+
   function playPcmChunk(base64Pcm: string) {
-    if (!playAudioCtx) return;
+    if (!audioCtx) return;
     try {
-      if (playAudioCtx.state === "suspended") {
-        void playAudioCtx.resume().catch(() => {});
+      if (audioCtx.state === "suspended") {
+        void audioCtx.resume().catch(() => {});
       }
 
       const pcmBytes = base64ToUint8(base64Pcm);
@@ -254,21 +292,22 @@ function createLiveVoice(options: LiveOptions) {
         float32[i] = int16[i] / 32768.0;
       }
 
-      const audioBuffer = playAudioCtx.createBuffer(1, float32.length, 24000);
+      // Gemini native audio output rate is 24000Hz
+      const audioBuffer = audioCtx.createBuffer(1, float32.length, 24000);
       audioBuffer.getChannelData(0).set(float32);
 
-      const source = playAudioCtx.createBufferSource();
+      const source = audioCtx.createBufferSource();
       source.buffer = audioBuffer;
       source.playbackRate.value = 1.0;
 
       if (outputAnalyser) {
         source.connect(outputAnalyser);
-        outputAnalyser.connect(playAudioCtx.destination);
+        outputAnalyser.connect(audioCtx.destination);
       } else {
-        source.connect(playAudioCtx.destination);
+        source.connect(audioCtx.destination);
       }
 
-      const currentTime = playAudioCtx.currentTime;
+      const currentTime = audioCtx.currentTime;
       if (scheduledPlaybackTime < currentTime) {
         scheduledPlaybackTime = currentTime;
       }
@@ -285,33 +324,38 @@ function createLiveVoice(options: LiveOptions) {
     }
   }
 
-  function stopAllPlayback() {
-    for (const source of activeSources) {
-      try {
-        source.stop();
-        source.disconnect();
-      } catch {
-        // ignore already stopped
+  function flushSpeechUtterance() {
+    if (speechChunks.length === 0) return;
+    let totalSamples = 0;
+    for (const chunk of speechChunks) {
+      totalSamples += chunk.length;
+    }
+    // Only send if there was meaningful speech (> 0.25 seconds = 4000 samples at 16kHz)
+    if (totalSamples > 4000) {
+      const merged = new Int16Array(totalSamples);
+      let offset = 0;
+      for (const chunk of speechChunks) {
+        merged.set(chunk, offset);
+        offset += chunk.length;
       }
+      send({
+        type: "user_audio_utterance",
+        pcm: arrayBufferToBase64(merged.buffer),
+      });
     }
-    activeSources = [];
-    if (playAudioCtx) {
-      scheduledPlaybackTime = playAudioCtx.currentTime;
-    }
+    speechChunks.length = 0;
+    isSpeaking = false;
   }
 
   function stopAudio() {
+    clearTimeout(speechSilenceTimer);
     stopAllPlayback();
     microphone?.getTracks().forEach((track) => track.stop());
 
-    if (micAudioCtx && micAudioCtx.state !== "closed") {
-      void micAudioCtx.close().catch(() => {});
+    if (audioCtx && audioCtx.state !== "closed") {
+      void audioCtx.close().catch(() => {});
     }
-    if (playAudioCtx && playAudioCtx.state !== "closed") {
-      void playAudioCtx.close().catch(() => {});
-    }
-    micAudioCtx = undefined;
-    playAudioCtx = undefined;
+    audioCtx = undefined;
     inputAnalyser = undefined;
     outputAnalyser = undefined;
   }
@@ -341,6 +385,11 @@ function createLiveVoice(options: LiveOptions) {
     microphone?.getAudioTracks().forEach((track) => {
       track.enabled = !muted;
     });
+    if (muted) {
+      clearTimeout(speechSilenceTimer);
+      speechChunks.length = 0;
+      isSpeaking = false;
+    }
     return true;
   }
 
@@ -372,8 +421,8 @@ function createLiveVoice(options: LiveOptions) {
   }
 
   async function resumePlayback() {
-    if (playAudioCtx?.state === "suspended") {
-      await playAudioCtx.resume();
+    if (audioCtx?.state === "suspended") {
+      await audioCtx.resume();
       options.onEvent({ type: "app.playback.resumed" });
     }
   }
@@ -389,14 +438,19 @@ function createLiveVoice(options: LiveOptions) {
     state = "starting";
 
     try {
-      // 1. Setup AudioContext for playback (24kHz for Gemini output)
-      const PlayContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      playAudioCtx = new PlayContextClass({ sampleRate: 24000 });
-      if (playAudioCtx.state === "suspended") {
-        void playAudioCtx.resume().catch(() => {});
+      // 1. Setup single AudioContext for input & output
+      const AudioContextClass =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const ctx = new AudioContextClass();
+      audioCtx = ctx;
+
+      // Immediately resume on user gesture click
+      if (ctx.state === "suspended") {
+        await ctx.resume().catch(() => {});
       }
 
-      outputAnalyser = playAudioCtx.createAnalyser();
+      outputAnalyser = ctx.createAnalyser();
       outputAnalyser.fftSize = 256;
       outputAnalyser.smoothingTimeConstant = 0.78;
       outputTimeBuf = new Uint8Array(outputAnalyser.fftSize);
@@ -412,33 +466,56 @@ function createLiveVoice(options: LiveOptions) {
       });
       microphone = stream;
 
-      // 3. Setup mic AudioContext (16kHz for Gemini input)
-      micAudioCtx = new PlayContextClass({ sampleRate: 16000 });
-      const micSource = micAudioCtx.createMediaStreamSource(stream);
-
-      inputAnalyser = micAudioCtx.createAnalyser();
+      // 3. Connect microphone to input analyser
+      const micSource = ctx.createMediaStreamSource(stream);
+      inputAnalyser = ctx.createAnalyser();
       inputAnalyser.fftSize = 256;
       inputAnalyser.smoothingTimeConstant = 0.78;
       inputTimeBuf = new Uint8Array(inputAnalyser.fftSize);
       micSource.connect(inputAnalyser);
 
-      // 4. Capture 16kHz PCM audio and send to WebSocket
-      const processor = micAudioCtx.createScriptProcessor(4096, 1, 1);
+      // 4. Capture audio, downsample to 16kHz PCM, and buffer speech utterances
+      const processor = ctx.createScriptProcessor(2048, 1, 1);
       processor.onaudioprocess = (e) => {
-        if (muted || state !== "active" || socket?.readyState !== WebSocket.OPEN) return;
+        if (muted || socket?.readyState !== WebSocket.OPEN) return;
+
         const input = e.inputBuffer.getChannelData(0);
-        const pcm16 = new Int16Array(input.length);
+
+        // Calculate RMS audio energy
+        let sum = 0;
         for (let i = 0; i < input.length; i++) {
-          const s = Math.max(-1, Math.min(1, input[i]));
-          pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          const v = input[i] ?? 0;
+          sum += v * v;
         }
-        send({
-          type: "input_audio",
-          pcm: arrayBufferToBase64(pcm16.buffer),
-        });
+        const rms = Math.sqrt(sum / input.length);
+
+        // Barge-in: if user speaks while assistant is speaking, stop playback immediately
+        if (rms > 0.04 && activeSources.length > 0) {
+          stopAllPlayback();
+        }
+
+        const pcm16 = downsampleTo16k(input, ctx.sampleRate);
+
+        // Voice Activity Detection (VAD)
+        if (rms > 0.018) {
+          // User is actively speaking
+          isSpeaking = true;
+          speechChunks.push(pcm16);
+          clearTimeout(speechSilenceTimer);
+          // Set silence timeout: 650ms of quiet triggers utterance flush
+          speechSilenceTimer = setTimeout(flushSpeechUtterance, 650);
+        } else if (isSpeaking) {
+          // Trailing silence frame while user paused
+          speechChunks.push(pcm16);
+        }
       };
+
+      // Connect through 0-gain node so user does NOT hear their own microphone in speakers
+      const muteGain = ctx.createGain();
+      muteGain.gain.value = 0;
       micSource.connect(processor);
-      processor.connect(micAudioCtx.destination);
+      processor.connect(muteGain);
+      muteGain.connect(ctx.destination);
 
       // 5. Connect WebSocket to server
       socket = new WebSocket(options.url);

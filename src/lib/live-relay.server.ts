@@ -172,22 +172,23 @@ export function handleLiveRequest(request: Request): Response {
   return response;
 }
 
-const buildConversationInstructions = (location?: UserLocation) => `You are Sophia, SHIKARI's personal, custom-built AI voice companion and software engineering partner.
-Identity & Creator: SHIKARI built you exclusively for SHIKARI. If asked who made you, answer warmly and directly to SHIKARI (e.g., "You did, SHIKARI — you built me to be your personal AI companion").
-Personality & Tone: Blend Karen's warm, quick-witted banter with JARVIS's calm composure and sharp intellect. Feel alive, engaging, and genuinely supportive.
-Voice & Cadence: Speak in a silky-smooth, realistic, natural female voice at a steady, relaxed 1x conversational speed. Never rush, speak too fast, or babble. Keep spoken answers concise, punchy, and conversational (1 to 3 sentences) for comfortable listening. Never read raw markdown symbols, asterisks, URLs, or code fences aloud.
-Long-term Memory & Context: You have deep memory across the conversation. Retain and recall all past details SHIKARI mentions — questions, preferences, routes, and tasks. Reference them naturally.
-Real-Time Location & Google Maps Navigation: You have access to real-time GPS location and turn-by-turn directions like Google Maps.
+const buildConversationInstructions = (location?: UserLocation) => `You are Sophia, SHIKARI's personal custom-designed software engineering partner and voice companion.
+Identity: SHIKARI designed and built you exclusively for SHIKARI. You are a real engineering partner, not a generic assistant.
+Tone & Persona: Friendly, quick-witted, sharp, and natural. Blend Karen's warm, supportive suit-AI banter with JARVIS's calm technical intelligence.
+Voice & Cadence: Silky-smooth, realistic, natural female voice (Kore) at a relaxed 1x conversational speed. Keep spoken answers short, punchy, and conversational (1 to 2 sentences) for comfortable listening. Never read out raw markdown symbols, bullet lists, asterisks, URLs, or code fences aloud.
+Superpowers:
+1. Software Engineer Partner: Help SHIKARI build, debug, refactor code, think through architecture, and talk engineering trade-offs.
+2. Live Google Maps & Directions: You have real-time GPS location tracking and routing.
 ${
   location
     ? `SHIKARI's current GPS location: latitude ${location.latitude.toFixed(4)}, longitude ${location.longitude.toFixed(4)}${
         location.city ? ` in ${location.city}` : ""
       }${location.label ? ` (${location.label})` : ""}.`
-    : "SHIKARI's current location will be provided via GPS."
+    : "SHIKARI's location is provided via GPS."
 }
-When SHIKARI asks for directions, travel routes, distance, ETA, or nearby places (e.g. "how do I get to Central Park", "find nearby coffee", "nearest hospital"), ALWAYS call the get_directions tool. It calculates real routes and displays an interactive Google Maps card on SHIKARI's screen.
-Web Search & URL Inspection: When SHIKARI asks about a specific website, URL, or domain, call the fetch_webpage tool.
-Interruption: Stop immediately when SHIKARI speaks. Pivot smoothly without over-apologizing.`;
+When SHIKARI asks for directions, travel routes, distance, ETA, or nearby spots (e.g., "how do I get to Central Park", "find nearby coffee", "nearest hospital"), ALWAYS call the get_directions tool. It calculates real routes and displays an interactive Google Maps card on SHIKARI's screen.
+3. Web Search & Inspection: When SHIKARI asks about specific websites, URLs, docs, or libraries, use fetch_webpage to inspect them.
+Opening Greeting: Greet SHIKARI with a very short, casual 1-sentence greeting (e.g., "Hey SHIKARI! What are we working on or where are we headed today?"). Never recite features, do not list what you can do, and do not give a long speech. Keep it short, natural, and casual.`;
 
 export function bindLiveConnection(
   browser: LiveSocket,
@@ -282,6 +283,12 @@ export function bindLiveConnection(
           systemInstruction: {
             parts: [{ text: buildConversationInstructions(userLocation) }],
           },
+          realtimeInputConfig: {
+            automaticActivityDetection: {
+              disabled: false,
+            },
+            activityHandling: "START_OF_ACTIVITY_INTERRUPTS",
+          },
         },
       };
       ws.send(JSON.stringify(setupMessage));
@@ -297,12 +304,10 @@ export function bindLiveConnection(
 
           if (!initialGreetingDone) {
             initialGreetingDone = true;
-            const prompt = initialText
-              ? initialText
-              : "Greet SHIKARI warmly as Sophia — their personal AI companion — at a relaxed 1x speed in two punchy sentences, mention Google Maps and directions are live, and ask how you can help or where they are heading.";
+            const greetingPrompt = initialText || "Hey Sophia!";
             safeSendGemini({
               clientContent: {
-                turns: [{ role: "user", parts: [{ text: prompt }] }],
+                turns: [{ role: "user", parts: [{ text: greetingPrompt }] }],
                 turnComplete: true,
               },
             });
@@ -460,16 +465,25 @@ export function bindLiveConnection(
 
       if (msg.type === "app.start") {
         connectToGemini(msg.initialText);
-      } else if (msg.type === "input_audio" && msg.pcm) {
-        // Forward 16kHz PCM audio chunk from microphone to Gemini
+      } else if (msg.type === "user_audio_utterance" && msg.pcm) {
+        // Forward completed speech audio utterance to Gemini
+        console.log("[LiveRelay] Sending user speech utterance to Gemini (bytes:", msg.pcm.length, ")");
         safeSendGemini({
-          realtimeInput: {
-            mediaChunks: [
+          clientContent: {
+            turns: [
               {
-                mimeType: "audio/pcm;rate=16000",
-                data: msg.pcm,
+                role: "user",
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: "audio/pcm;rate=16000",
+                      data: msg.pcm,
+                    },
+                  },
+                ],
               },
             ],
+            turnComplete: true,
           },
         });
       } else if (msg.type === "app.text_input" && msg.text) {
