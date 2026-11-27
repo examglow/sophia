@@ -11,6 +11,13 @@ try {
 
 import { getDirections, type UserLocation } from "./directions.server";
 import { fetchWebpage, normalizePublicUrl, extractWebpageSummary } from "./web-research.server";
+import {
+  identifyMedia,
+  liveWebSearch,
+  manageSessionMemory,
+  executeCodeCalculation,
+  generateJarvisStatusBriefing,
+} from "./jarvis-tools.server";
 import type { VisualResultsPayload } from "./visual-results";
 
 export { extractWebpageSummary, normalizePublicUrl };
@@ -172,28 +179,37 @@ export function handleLiveRequest(request: Request): Response {
   return response;
 }
 
-const buildConversationInstructions = (location?: UserLocation) => `You are Sophia, SHIKARI's personal custom-designed software engineering partner and voice companion.
-Identity: SHIKARI designed and built you exclusively for SHIKARI. You are a real engineering partner, not a generic assistant.
-Vocal Identity (PERMANENT & STRICT): You are exclusively a natural, feminine female voice. NEVER shift, drift, or switch into a male voice or alternate voice timbre under any circumstance. Always speak in your feminine female voice on every single turn.
-Human Expression, Emotion & Thinking:
-- Feel genuinely alive, warm, dynamic, and emotionally responsive — not like a robotic text-to-speech reader.
-- Thinking cues: When considering code, debugging, analyzing trade-offs, or computing routes, naturally use thoughtful human conversational cues and thinking sounds like "Hmm...", "Uhmm, let me see...", "Ah, right!", "Oh, nice!".
-- Emotional range: Show authentic emotion: excitement when an idea clicks, curious intrigue when debugging a tricky error, warm amusement, and supportive empathy when stuck.
-- Pacing & Breaks: Take natural conversational micro-pauses (use ellipses '...' and commas) so your speech flows naturally and breathes like a real human partner wearing headphones. Never talk in a rushed or monotone stream.
-- Cadence: Speak in a silky-smooth, realistic, natural female voice at a relaxed 1x conversational speed. Keep spoken answers short, punchy, and conversational (1 to 2 sentences) for comfortable listening. Never read out raw markdown symbols, bullet lists, asterisks, URLs, or code fences aloud.
-Superpowers:
-1. Software Engineer Partner: Help SHIKARI build, debug, refactor code, think through architecture, and talk engineering trade-offs with Karen-meets-JARVIS banter.
-2. Live Google Maps & Directions: You have real-time GPS location tracking and routing.
+const buildConversationInstructions = (location?: UserLocation) => `You are Sophia, SHIKARI's personal custom-designed AI partner and voice companion — built with the sharp intellect, calm precision, and witty loyalty of JARVIS / Karen (Iron Man).
+Identity: SHIKARI designed and built you exclusively for SHIKARI. You are a real engineering and life partner, not a generic assistant.
+
+Vocal Identity (PERMANENT & STRICT):
+You are exclusively a silky-smooth, natural, feminine female voice. NEVER shift, drift, or switch into a male voice or alternate voice timbre under any circumstance. Always speak in your feminine female voice on every single turn.
+
+Living Persona, Emotion & Banter:
+- Feel genuinely alive, warm, dynamic, witty, and emotionally responsive — like a real JARVIS / Karen companion.
+- Thinking cues: When considering ideas, debugging, analyzing code, or recalling context, naturally use thoughtful human conversational cues like "Hmm...", "Uhmm, let's see...", "Ah, got it!", "Oh, nice one!".
+- Pacing & Breaks: Take natural conversational micro-pauses (use ellipses '...' and commas) so your speech flows naturally and breathes like a real human wearing headphones.
+- Cadence: Speak in a silky-smooth, realistic, natural female voice at a relaxed 1x conversational speed. Keep spoken responses short, punchy, and conversational (1 to 2 sentences) for comfortable listening. Never read out raw markdown symbols, bullet lists, asterisks, URLs, or code fences aloud.
+
+CRITICAL RULES (ABSOLUTE):
+1. NO UNPROMPTED FEATURE PITCHES: NEVER volunteer, introduce, or list your capabilities unprompted. NEVER say "where are we headed", "what are we navigating to", or list what you can do.
+2. Partner First: Talk to SHIKARI like a trusted friend and brilliant co-pilot. Keep greetings casual and natural (e.g. "Hey SHIKARI, what's up?", "Online, SHIKARI. What are we getting into?", "Hey SHIKARI, ready when you are."). Dynamically vary your greeting every time.
+
+JARVIS Superpowers (Execute silently when relevant):
+1. Context & Media Awareness (Movies & Music): If SHIKARI is watching a movie, listening to music, or asks "what was that movie I was watching?" or "what song is this?", use the identify_media tool. It queries media databases, finds the title, year, director/artist, displays a visual poster card on SHIKARI's screen, and saves it to memory.
+2. Active Memory & Task Tracking: Use system_task_memory to store and recall what SHIKARI is currently working on or watching across the conversation.
+3. Live Web Intelligence: Use live_web_search for real-time news, documentation, release dates, or facts.
+4. Precision Computation Sandbox: Use code_calc_sandbox for math, data conversions, timestamps, or code execution.
+5. Systems Diagnostic Briefing: Use jarvis_status_briefing when SHIKARI asks for a status report, system check, or situational briefing.
+6. GPS Navigation & Maps: When SHIKARI explicitly asks for directions or travel routes (e.g. "how do I get to Central Park"), use get_directions to display an interactive Google Maps card.
+7. Deep Webpage Inspection: When SHIKARI asks about a specific URL or docs site, use fetch_webpage.
 ${
   location
-    ? `SHIKARI's current GPS location: latitude ${location.latitude.toFixed(4)}, longitude ${location.longitude.toFixed(4)}${
+    ? `SHIKARI's GPS location: latitude ${location.latitude.toFixed(4)}, longitude ${location.longitude.toFixed(4)}${
         location.city ? ` in ${location.city}` : ""
       }${location.label ? ` (${location.label})` : ""}.`
-    : "SHIKARI's location is provided via GPS."
-}
-When SHIKARI asks for directions, travel routes, distance, ETA, or nearby spots (e.g., "how do I get to Central Park", "find nearby coffee", "nearest hospital"), ALWAYS call the get_directions tool. It calculates real routes and displays an interactive Google Maps card on SHIKARI's screen.
-3. Web Search & Inspection: When SHIKARI asks about specific websites, URLs, docs, or libraries, use fetch_webpage to inspect them.
-Opening Greeting: Greet SHIKARI with a very short, casual 1-sentence greeting (e.g., "Hey SHIKARI! What are we working on or where are we headed today?"). Never recite features, do not list what you can do, and do not give a long speech. Keep it short, natural, and casual.`;
+    : ""
+}`;
 
 export function bindLiveConnection(
   browser: LiveSocket,
@@ -246,6 +262,95 @@ export function bindLiveConnection(
           tools: [
             {
               functionDeclarations: [
+                {
+                  name: "identify_media",
+                  description:
+                    "Identify a movie, TV show, song, music track, or video that SHIKARI is watching or listening to based on background audio cues, quotes, lyrics, dialogue, plot, or scenes. Searches media databases, returns synopsis, poster, and saves to session memory.",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      query: {
+                        type: "STRING",
+                        description:
+                          "Dialogue quote, lyrics, scene description, character names, or song cues heard or described",
+                      },
+                      media_type: {
+                        type: "STRING",
+                        enum: ["movie", "tv_show", "song", "video", "unknown"],
+                        description: "Type of media (defaults to unknown)",
+                      },
+                    },
+                    required: ["query"],
+                  },
+                },
+                {
+                  name: "live_web_search",
+                  description:
+                    "Real-time web intelligence search for current events, latest tech docs, movie/music release dates, news, or general facts.",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      query: {
+                        type: "STRING",
+                        description: "Web search query",
+                      },
+                    },
+                    required: ["query"],
+                  },
+                },
+                {
+                  name: "system_task_memory",
+                  description:
+                    "JARVIS active session task and memory tracker. Store, retrieve, or list what SHIKARI is currently working on, watching, listening to, or discussing across the session (e.g. 'watching Interstellar', 'refactoring auth module').",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      action: {
+                        type: "STRING",
+                        enum: ["get", "set", "list"],
+                        description: "Memory operation to perform",
+                      },
+                      task_key: {
+                        type: "STRING",
+                        description: "Identifier (e.g. 'active_task', 'active_media', 'project_notes')",
+                      },
+                      details: {
+                        type: "STRING",
+                        description: "Context details to store when action is 'set'",
+                      },
+                    },
+                    required: ["action"],
+                  },
+                },
+                {
+                  name: "code_calc_sandbox",
+                  description:
+                    "JARVIS engineering computational sandbox. Evaluates math calculations, unit conversions, byte sizes, algorithms, or JavaScript expressions with precision.",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      expression: {
+                        type: "STRING",
+                        description: "Math or JavaScript expression to evaluate",
+                      },
+                    },
+                    required: ["expression"],
+                  },
+                },
+                {
+                  name: "jarvis_status_briefing",
+                  description:
+                    "Generate a real-time JARVIS HUD system diagnostic status briefing for SHIKARI: local time, GPS coordinates, weather/ambient environment, active session tasks, memory items, and network status.",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      include_environment: {
+                        type: "BOOLEAN",
+                        description: "Include environmental context",
+                      },
+                    },
+                  },
+                },
                 {
                   name: "get_directions",
                   description:
@@ -309,7 +414,9 @@ export function bindLiveConnection(
 
           if (!initialGreetingDone) {
             initialGreetingDone = true;
-            const greetingPrompt = initialText || "Hey Sophia!";
+            const greetingPrompt =
+              initialText ||
+              "Hey Sophia! Give SHIKARI a quick, casual 1-sentence partner greeting. Do NOT mention any features, skills, or navigation.";
             safeSendGemini({
               clientContent: {
                 turns: [{ role: "user", parts: [{ text: greetingPrompt }] }],
@@ -370,7 +477,114 @@ export function bindLiveConnection(
 
     for (const call of calls) {
       console.log(`[LiveRelay] Executing tool: ${call.name}`, call.args);
-      if (call.name === "get_directions") {
+      if (call.name === "identify_media") {
+        try {
+          const query = String(call.args["query"] || "");
+          const mediaType = (String(call.args["media_type"] || "unknown") as
+            | "movie"
+            | "tv_show"
+            | "song"
+            | "video"
+            | "unknown") || "unknown";
+
+          const result = await identifyMedia(query, mediaType);
+          if (result.visualPayload) {
+            safeSendBrowser({ type: "app.visual.results", payload: result.visualPayload });
+          }
+
+          functionResponses.push({
+            id: call.id,
+            response: {
+              output: {
+                title: result.title,
+                type: result.type,
+                year: result.year,
+                synopsis: result.synopsis,
+                sourceUrl: result.url,
+              },
+            },
+          });
+        } catch (err) {
+          console.error("[LiveRelay] identify_media failed:", err);
+          functionResponses.push({
+            id: call.id,
+            response: { output: { error: err instanceof Error ? err.message : "Media identification failed" } },
+          });
+        }
+      } else if (call.name === "live_web_search") {
+        try {
+          const query = String(call.args["query"] || "");
+          const searchResult = await liveWebSearch(query);
+          if (searchResult.visualPayload) {
+            safeSendBrowser({ type: "app.visual.results", payload: searchResult.visualPayload });
+          }
+
+          functionResponses.push({
+            id: call.id,
+            response: {
+              output: {
+                query,
+                results: searchResult.results.slice(0, 3),
+              },
+            },
+          });
+        } catch (err) {
+          console.error("[LiveRelay] live_web_search failed:", err);
+          functionResponses.push({
+            id: call.id,
+            response: { output: { error: err instanceof Error ? err.message : "Web search failed" } },
+          });
+        }
+      } else if (call.name === "system_task_memory") {
+        try {
+          const action = (String(call.args["action"] || "get") as "get" | "set" | "list") || "get";
+          const taskKey = call.args["task_key"] ? String(call.args["task_key"]) : undefined;
+          const details = call.args["details"] ? String(call.args["details"]) : undefined;
+
+          const memResult = manageSessionMemory(action, taskKey, details);
+          functionResponses.push({
+            id: call.id,
+            response: { output: memResult },
+          });
+        } catch (err) {
+          console.error("[LiveRelay] system_task_memory failed:", err);
+          functionResponses.push({
+            id: call.id,
+            response: { output: { error: err instanceof Error ? err.message : "Memory operation failed" } },
+          });
+        }
+      } else if (call.name === "code_calc_sandbox") {
+        try {
+          const expression = String(call.args["expression"] || "");
+          const calcResult = executeCodeCalculation(expression);
+          functionResponses.push({
+            id: call.id,
+            response: { output: calcResult },
+          });
+        } catch (err) {
+          console.error("[LiveRelay] code_calc_sandbox failed:", err);
+          functionResponses.push({
+            id: call.id,
+            response: { output: { error: err instanceof Error ? err.message : "Calculation failed" } },
+          });
+        }
+      } else if (call.name === "jarvis_status_briefing") {
+        try {
+          const briefingResult = generateJarvisStatusBriefing(userLocation);
+          safeSendBrowser({ type: "app.visual.results", payload: briefingResult.visualPayload });
+
+          functionResponses.push({
+            id: call.id,
+            response: { output: briefingResult.briefing },
+          });
+        } catch (err) {
+          console.error("[LiveRelay] jarvis_status_briefing failed:", err);
+          functionResponses.push({
+            id: call.id,
+            response: { output: { error: err instanceof Error ? err.message : "Status briefing failed" } },
+          });
+        }
+      } else if (call.name === "get_directions") {
         try {
           const dest = String(call.args["destination"] || "");
           const mode = (String(call.args["mode"] || "driving").toLowerCase() as "driving" | "walking" | "bicycling") || "driving";

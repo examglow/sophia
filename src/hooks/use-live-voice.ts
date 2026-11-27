@@ -292,6 +292,14 @@ function createLiveVoice(options: LiveOptions) {
         float32[i] = int16[i] / 32768.0;
       }
 
+      // Micro-fade chunk boundaries to eliminate DC clicks & pops
+      const fadeLen = Math.min(24, float32.length >> 1);
+      for (let i = 0; i < fadeLen; i++) {
+        const factor = i / fadeLen;
+        float32[i] *= factor;
+        float32[float32.length - 1 - i] *= factor;
+      }
+
       // Gemini native audio output rate is 24000Hz
       const audioBuffer = audioCtx.createBuffer(1, float32.length, 24000);
       audioBuffer.getChannelData(0).set(float32);
@@ -308,9 +316,15 @@ function createLiveVoice(options: LiveOptions) {
       }
 
       const currentTime = audioCtx.currentTime;
-      // Pre-buffering jitter buffer: 180ms safety window prevents speaker buffer underruns, clicks, cracks, and hooks
-      if (scheduledPlaybackTime < currentTime) {
-        scheduledPlaybackTime = currentTime + 0.18;
+      const isStartingTurn = activeSources.length === 0 && scheduledPlaybackTime <= currentTime;
+
+      if (isStartingTurn) {
+        // Pre-roll jitter buffer (140ms) ONLY when beginning a turn from idle
+        scheduledPlaybackTime = currentTime + 0.14;
+      } else if (scheduledPlaybackTime < currentTime) {
+        // Mid-stream network jitter: never create an artificial silence gap!
+        // Schedule seamlessly with a tiny 15ms margin to preserve continuous flow.
+        scheduledPlaybackTime = currentTime + 0.015;
       }
 
       source.start(scheduledPlaybackTime);
@@ -482,7 +496,7 @@ function createLiveVoice(options: LiveOptions) {
 
         const input = e.inputBuffer.getChannelData(0);
 
-        // Calculate RMS audio energy
+        // Calculate input RMS audio energy
         let sum = 0;
         for (let i = 0; i < input.length; i++) {
           const v = input[i] ?? 0;
@@ -490,15 +504,29 @@ function createLiveVoice(options: LiveOptions) {
         }
         const rms = Math.sqrt(sum / input.length);
 
-        // Barge-in: if user speaks while assistant is speaking, stop playback immediately
-        if (rms > 0.04 && activeSources.length > 0) {
-          stopAllPlayback();
+        const isAssistantSpeaking = activeSources.length > 0;
+        const currentOutputRms =
+          isAssistantSpeaking && outputAnalyser && outputTimeBuf
+            ? sampleRms(outputAnalyser, outputTimeBuf)
+            : 0;
+
+        // Acoustic Echo Suppression & Barge-in:
+        // When assistant is speaking, speaker sound leaked into mic must NEVER cause self-interruption!
+        // Only trigger intentional user barge-in if the user speaks distinctly louder than the speaker output
+        if (isAssistantSpeaking) {
+          const isLoudUserInterruption = rms > 0.14 && rms > currentOutputRms * 1.5;
+          if (isLoudUserInterruption) {
+            stopAllPlayback();
+          } else {
+            // Drop speaker echo frames so Sophia never talks over herself or feeds echo back into Gemini
+            return;
+          }
         }
 
         const pcm16 = downsampleTo16k(input, ctx.sampleRate);
 
-        // Voice Activity Detection (VAD)
-        if (rms > 0.018) {
+        // Voice Activity Detection (VAD) when listening
+        if (rms > 0.020) {
           // User is actively speaking
           isSpeaking = true;
           speechChunks.push(pcm16);
