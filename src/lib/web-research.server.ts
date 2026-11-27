@@ -6,6 +6,10 @@ import {
 } from "@lovable.dev/ai-gateway";
 
 import {
+  getDirections,
+  type UserLocation,
+} from "./directions.server";
+import {
   extractDomain,
   extractYouTubeVideoId,
   type VisualResultItem,
@@ -281,7 +285,9 @@ export function sanitizeVisualResultsInput(value: unknown): VisualResultsPayload
     if (!title) continue;
     const rawKind = row["kind"];
     let kind: VisualResultKind =
-      rawKind === "video" || rawKind === "code" || rawKind === "link" ? rawKind : "link";
+      rawKind === "video" || rawKind === "code" || rawKind === "link" || rawKind === "map"
+        ? rawKind
+        : "link";
     const subtitle =
       typeof row["subtitle"] === "string" && row["subtitle"].trim()
         ? row["subtitle"].trim().slice(0, 220)
@@ -294,6 +300,29 @@ export function sanitizeVisualResultsInput(value: unknown): VisualResultsPayload
       typeof row["language"] === "string" && row["language"].trim()
         ? row["language"].trim().slice(0, 32)
         : undefined;
+    const destination =
+      typeof row["destination"] === "string" && row["destination"].trim()
+        ? row["destination"].trim().slice(0, 150)
+        : undefined;
+    const origin =
+      typeof row["origin"] === "string" && row["origin"].trim()
+        ? row["origin"].trim().slice(0, 150)
+        : undefined;
+    const distance =
+      typeof row["distance"] === "string" && row["distance"].trim()
+        ? row["distance"].trim().slice(0, 60)
+        : undefined;
+    const duration =
+      typeof row["duration"] === "string" && row["duration"].trim()
+        ? row["duration"].trim().slice(0, 60)
+        : undefined;
+    const mode =
+      row["mode"] === "walking" || row["mode"] === "bicycling" || row["mode"] === "driving"
+        ? row["mode"]
+        : undefined;
+    const steps = Array.isArray(row["steps"])
+      ? row["steps"].filter((s): s is string => typeof s === "string" && Boolean(s.trim()))
+      : undefined;
 
     let url: string | undefined;
     if (typeof row["url"] === "string" && row["url"].trim()) {
@@ -304,7 +333,7 @@ export function sanitizeVisualResultsInput(value: unknown): VisualResultsPayload
       }
     }
 
-    if (kind !== "code" && !url) continue;
+    if (kind !== "code" && kind !== "map" && !url) continue;
     if (kind === "code" && !code) continue;
 
     let imageUrl: string | undefined;
@@ -335,6 +364,12 @@ export function sanitizeVisualResultsInput(value: unknown): VisualResultsPayload
       ...(imageUrl ? { imageUrl } : {}),
       ...(code ? { code } : {}),
       ...(language ? { language } : {}),
+      ...(destination ? { destination } : {}),
+      ...(origin ? { origin } : {}),
+      ...(distance ? { distance } : {}),
+      ...(duration ? { duration } : {}),
+      ...(mode ? { mode } : {}),
+      ...(steps ? { steps } : {}),
     });
   }
 
@@ -403,12 +438,21 @@ export async function answerEngineeringQuestion(params: {
   backendModel: BackendModel;
   correlation: { runID: string; sessionID: string; delegationID: string };
   signal: AbortSignal;
+  userLocation?: UserLocation;
   takeNewInputs: () => BackendInputItem[];
   onSearching: () => void;
   onVisualResults: (payload: VisualResultsPayload) => void;
 }): Promise<{ answer: string; committedHistory: BackendInputItem[] }> {
-  const { history, backendModel, correlation, signal, takeNewInputs, onSearching, onVisualResults } =
-    params;
+  const {
+    history,
+    backendModel,
+    correlation,
+    signal,
+    userLocation,
+    takeNewInputs,
+    onSearching,
+    onVisualResults,
+  } = params;
   const working: BackendInputItem[] = [...history];
   let searchAnnounced = false;
 
@@ -417,6 +461,10 @@ export async function answerEngineeringQuestion(params: {
     searchAnnounced = true;
     onSearching();
   };
+
+  const locationContext = userLocation
+    ? `SHIKARI's real-time GPS location: latitude ${userLocation.latitude.toFixed(4)}, longitude ${userLocation.longitude.toFixed(4)}${userLocation.city ? ` (${userLocation.city})` : ""}${userLocation.label ? ` near ${userLocation.label}` : ""}. When SHIKARI asks for directions, routes, how to get somewhere, nearby places, or travel times ('how do I get to Central Park', 'find coffee shops near me', 'nearest hospital'), ALWAYS call get_directions with the destination. It calculates real routes and displays an interactive Google Maps card on SHIKARI's screen. `
+    : "If SHIKARI asks for directions or nearby places, call get_directions with the destination to generate an interactive Google Maps route card. ";
 
   for (let step = 0; step < 8; step++) {
     signal.throwIfAborted();
@@ -428,18 +476,42 @@ export async function answerEngineeringQuestion(params: {
         model: backendModel,
         input: working,
         instructions:
-          "You are the engineering research, web search, and visual results engine behind Sophia, SHIKARI's personal voice and text coding companion built by SHIKARI exclusively for SHIKARI. " +
+          "You are the engineering research, web search, location, and visual results engine behind Sophia, SHIKARI's personal voice and text coding companion built by SHIKARI exclusively for SHIKARI. " +
           "Never claim OpenAI or any other company built Sophia; SHIKARI built Sophia. " +
           "Transcripts may be fragmented or corrected; always honor the latest correction. " +
+          locationContext +
+          "Use get_directions whenever SHIKARI asks for directions, travel routes, navigation, ETA, distance, or nearby places. " +
           "Use web_search for web research, videos, tutorials, documentation, package versions, changelogs, errors, news, and current facts. " +
           "Use fetch_webpage ONLY when SHIKARI explicitly mentions a specific website, domain, or URL (e.g., calvras.com, examglow.com) or when you need to inspect a specific page's content directly. " +
           "VISUAL RESULTS RULE: Whenever SHIKARI asks to show something ('show me', 'find me videos', 'pull up', 'search for videos/tutorials/repos/articles/docs/examples'), or when web_search finds visual or browsable links (like YouTube videos, official docs, GitHub repos, or websites worth opening), ALWAYS call show_visual_results with the real verified URLs before giving your final spoken summary. " +
           "Never invent or guess URLs — every URL in show_visual_results must come from web_search or fetch_webpage. " +
-          "Your final text response is ONLY spoken aloud by Sophia (never shown as text on screen), so return crisp, natural spoken prose (at most 120 words) with no markdown bold, no bullets, no raw URLs, and no code fences. If you showed visual cards, briefly refer to them naturally ('I pulled up a few videos for you...').",
+          "Your final text response is ONLY spoken aloud by Sophia (never shown as text on screen), so return crisp, natural spoken prose (at most 120 words) with no markdown bold, no bullets, no raw URLs, and no code fences. If you gave directions or showed visual cards, briefly refer to them naturally ('I pulled up the route and Google Maps on your screen...').",
         reasoning: { effort: "medium", summary: "auto" },
         include: ["reasoning.encrypted_content", "web_search_call.action.sources"],
         tools: [
           { type: "web_search", external_web_access: true, search_context_size: "medium" },
+          {
+            type: "function",
+            name: "get_directions",
+            parameters: {
+              type: "object",
+              properties: {
+                destination: {
+                  type: "string",
+                  description:
+                    "Destination place, business, address, or landmark SHIKARI wants directions to or places near them (e.g. 'Central Park', 'Starbucks', 'nearest hospital', 'Times Square').",
+                },
+                mode: {
+                  type: "string",
+                  enum: ["driving", "walking", "bicycling"],
+                  description: "Travel mode (defaults to 'driving').",
+                },
+              },
+              required: ["destination"],
+              additionalProperties: false,
+            },
+            strict: true,
+          },
           {
             type: "function",
             name: "fetch_webpage",
@@ -479,7 +551,7 @@ export async function answerEngineeringQuestion(params: {
                   items: {
                     type: "object",
                     properties: {
-                      kind: { type: "string", enum: ["video", "link", "code"] },
+                      kind: { type: "string", enum: ["video", "link", "code", "map"] },
                       title: { type: "string" },
                       subtitle: { type: ["string", "null"] },
                       url: { type: ["string", "null"] },
@@ -555,6 +627,67 @@ export async function answerEngineeringQuestion(params: {
             output = {
               ok: false,
               error: err instanceof Error ? err.message : "Could not load webpage",
+            };
+          }
+        } else if (call.name === "get_directions") {
+          announceSearch();
+          try {
+            const args = JSON.parse(call.arguments) as {
+              destination: string;
+              mode?: "driving" | "walking" | "bicycling";
+            };
+            const route = await getDirections({
+              origin: userLocation
+                ? {
+                    lat: userLocation.latitude,
+                    lon: userLocation.longitude,
+                    label: userLocation.label || userLocation.city,
+                  }
+                : undefined,
+              destinationQuery: args.destination,
+              mode: args.mode || "driving",
+              signal,
+            });
+
+            const visualPayload: VisualResultsPayload = {
+              heading: `Directions to ${route.destination}`,
+              queryLabel: `${route.distance} • ${route.duration} • ${route.mode}`,
+              items: [
+                {
+                  id: `map-${Date.now()}`,
+                  kind: "map",
+                  title: `Directions to ${route.destination}`,
+                  subtitle: `${route.duration} (${route.distance}) via ${route.mode}`,
+                  url: route.googleMapsUrl,
+                  destination: route.destination,
+                  origin: route.origin,
+                  distance: route.distance,
+                  duration: route.duration,
+                  mode: route.mode,
+                  steps: route.steps.map((s) => s.instruction),
+                  embedUrl: route.embedUrl,
+                  lat: route.destCoords?.lat,
+                  lng: route.destCoords?.lon,
+                },
+              ],
+            };
+            onVisualResults(visualPayload);
+
+            output = {
+              ok: true,
+              origin: route.origin,
+              destination: route.destination,
+              distance: route.distance,
+              duration: route.duration,
+              mode: route.mode,
+              steps: route.steps.slice(0, 6).map((s) => s.instruction),
+              googleMapsUrl: route.googleMapsUrl,
+            };
+          } catch (err) {
+            if (signal.aborted) throw err;
+            output = {
+              ok: false,
+              error: err instanceof Error ? err.message : "Could not calculate directions",
             };
           }
         } else if (call.name === "show_visual_results") {

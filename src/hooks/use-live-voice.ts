@@ -141,6 +141,12 @@ export function useLiveVoice(
   const sendText = useCallback((text: string): boolean => {
     return controller.current?.sendText(text) ?? false;
   }, []);
+  const sendLocation = useCallback(
+    (location: { latitude: number; longitude: number; accuracy?: number; city?: string; label?: string }): boolean => {
+      return controller.current?.sendLocation(location) ?? false;
+    },
+    [],
+  );
   const resumePlayback = useCallback(() => {
     void controller.current?.resumePlayback();
   }, []);
@@ -148,7 +154,7 @@ export function useLiveVoice(
     return controller.current?.getAudioLevels() ?? { input: 0, output: 0, bands: EMPTY_BANDS };
   }, []);
 
-  return { ...call, audioRef, start, stop, setMuted, sendText, resumePlayback, getAudioLevels };
+  return { ...call, audioRef, start, stop, setMuted, sendText, sendLocation, resumePlayback, getAudioLevels };
 }
 
 type LiveOptions = {
@@ -339,6 +345,22 @@ function createLiveVoice(options: LiveOptions) {
     }
   }
 
+  function sendLocation(location: {
+    latitude: number;
+    longitude: number;
+    accuracy?: number;
+    city?: string;
+    label?: string;
+  }): boolean {
+    if (socket?.readyState !== WebSocket.OPEN) return false;
+    try {
+      send({ type: "app.location", ...location });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async function resumePlayback() {
     if ((state !== "starting" && state !== "active") || !options.audio.srcObject) return;
     try {
@@ -472,6 +494,8 @@ function createLiveVoice(options: LiveOptions) {
         if (state === "stopping" || state === "closed") return;
         playback = new MediaStream([track]);
         options.audio.srcObject = playback;
+        options.audio.defaultPlaybackRate = 1.0;
+        options.audio.playbackRate = 1.0;
         attachMeter(playback, "output");
         void resumePlayback();
       });
@@ -558,5 +582,5 @@ function createLiveVoice(options: LiveOptions) {
     }
   }
 
-  return { start, stop, setMuted, sendText, resumePlayback, getAudioLevels };
+  return { start, stop, setMuted, sendText, sendLocation, resumePlayback, getAudioLevels };
 }

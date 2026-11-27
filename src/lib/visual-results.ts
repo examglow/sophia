@@ -1,4 +1,4 @@
-export type VisualResultKind = "video" | "link" | "code";
+export type VisualResultKind = "video" | "link" | "code" | "map";
 
 export type VisualResultItem = {
   id: string;
@@ -10,6 +10,15 @@ export type VisualResultItem = {
   imageUrl?: string;
   code?: string;
   language?: string;
+  destination?: string;
+  origin?: string;
+  distance?: string;
+  duration?: string;
+  mode?: "driving" | "walking" | "bicycling";
+  steps?: string[];
+  embedUrl?: string;
+  lat?: number;
+  lng?: number;
 };
 
 export type VisualResultsPayload = {

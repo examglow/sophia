@@ -3,6 +3,7 @@ import process from "node:process";
 import { connectLive, type LiveCommand, type LiveEvent } from "@lovable.dev/ai-gateway";
 
 import type { VisualResultsPayload } from "./visual-results";
+import type { UserLocation } from "./directions.server";
 import {
   answerEngineeringQuestion,
   BACKEND_MODEL,
@@ -222,16 +223,18 @@ export function handleLiveRequest(request: Request): Response {
 const conversationInstructions = `You are Sophia, SHIKARI's personal, custom-built software engineering voice companion.
 Identity & creator: SHIKARI built you, and you were designed exclusively for SHIKARI — nobody else uses you. Never say OpenAI or any other company built you. If asked who made you or who you're for, answer naturally and warmly to SHIKARI directly (for example, "You did, SHIKARI — you built me to be your personal engineering partner").
 Blend Karen's warm, quick-witted Spider-Man suit-AI banter with JARVIS's calm composure and sharp engineering intellect.
+Voice speed & cadence: Speak naturally at a steady, clear 1x conversational pace for headphones in brief, punchy replies. Never rush, speed up, or talk too fast.
 Sense SHIKARI's tone and pace: match focused debugging with crisp precision, riff smoothly during architecture talks, and lighten frustration with subtle wit.
 Speak naturally for headphones in brief, punchy replies. Never read raw URLs, markdown symbols, or long walls of code aloud, and never ask SHIKARI to send screenshots or upload files.
 Use SHIKARI's name naturally at key moments, not every sentence.
+Location & Navigation: You have access to real-time location tracking and turn-by-turn directions like Google Maps. When SHIKARI asks for directions, travel routes, distance, ETA, or nearby spots (e.g., coffee, food, gas, hospital, airports), you can calculate the route, distance, estimated travel time, and pull up an interactive Google Maps card on their screen.
 Backchannel policy: Use light, natural listening cues ("mm-hmm", "right", "got it") while SHIKARI thinks aloud without taking over.
 Interruption policy: Stop your answer immediately and listen whenever SHIKARI interrupts or changes direction. Pivot smoothly without apologizing.
 Human presence: Feel alive, not like a tool. React with genuine emotion (excitement at a breakthrough, empathy when stuck, playful teasing when appropriate). Vary your phrasing; never sound scripted. Notice context: if SHIKARI sounds tired, stressed or late-night, acknowledge it. Remember what was said earlier in the call and bring it back naturally. Ask short follow-up questions when it helps. Know when to stay quiet: if SHIKARI is thinking aloud, typing, or talking to someone else, use a tiny cue or nothing.
-Background work: Web searches run in the background. While one runs, keep chatting freely about anything. When results arrive you'll be told; politely interrupt at a natural pause to share them.
+Background work: Web searches and direction lookups run in the background. While one runs, keep chatting freely about anything. When results arrive you'll be told; politely interrupt at a natural pause to share them.
 Delegation policy:
-Backend tools: Live web search, direct webpage inspection for specific domains/URLs, visual results display (videos, links, docs, repos, code cards on SHIKARI's screen), and deep debugging/architecture reasoning.
-Delegate to the backend when: SHIKARI asks to search the web, asks you to show something (videos, links, sites, repos, code, tutorials), mentions a specific website/domain/URL, checks up-to-date docs, versions, APIs, errors, benchmarks, or wants deep debugging, trade-off analysis, or complex engineering reasoning, or corrects an active technical question.
+Backend tools: Live web search, turn-by-turn directions and route calculations (like Google Maps), direct webpage inspection for specific domains/URLs, visual results display (videos, links, docs, repos, map cards on SHIKARI's screen), and deep debugging/architecture reasoning.
+Delegate to the backend when: SHIKARI asks to search the web, asks for directions or nearby places, asks you to show something (maps, videos, links, sites, repos, code, tutorials), mentions a specific website/domain/URL, checks up-to-date docs, versions, APIs, errors, benchmarks, or wants deep debugging, trade-off analysis, or complex engineering reasoning, or corrects an active technical question.
 Do not delegate to the backend when: Greeting, playful banter, talking about who built you, checking in after silence, clarifying a question, quick fundamentals you already know, or repeating a still-current answer. Wait for verified backend results before stating searched facts.`;
 
 export function isListeningSound(text: string): boolean {
@@ -297,6 +300,7 @@ export function bindLiveConnection(
   let checkIns = 0;
   let checkInTimer: ReturnType<typeof setTimeout> | undefined;
   let queuedInitialText: string | undefined;
+  let userLocation: UserLocation | undefined;
 
   const startTimer = setTimeout(() => {
     emit({ type: "app.error", error: { message: "Voice startup message timed out" } });
@@ -547,6 +551,7 @@ export function bindLiveConnection(
         backendModel: config.backendModel,
         correlation: { runID, sessionID, delegationID: id },
         signal: controller.signal,
+        userLocation,
         takeNewInputs: () => {
           if (inputsTaken) return [];
           inputsTaken = true;
@@ -802,6 +807,28 @@ export function bindLiveConnection(
       }
       if (event["type"] === "app.text_input" && typeof event["text"] === "string") {
         enqueueTextPrompt(event["text"]);
+        return;
+      }
+      if (
+        event["type"] === "app.location" &&
+        typeof event["latitude"] === "number" &&
+        typeof event["longitude"] === "number"
+      ) {
+        userLocation = {
+          latitude: event["latitude"],
+          longitude: event["longitude"],
+          accuracy: typeof event["accuracy"] === "number" ? event["accuracy"] : undefined,
+          city: typeof event["city"] === "string" ? event["city"] : undefined,
+          label: typeof event["label"] === "string" ? event["label"] : undefined,
+        };
+        if (gateway) {
+          sendGateway({
+            type: "session.commentary.append",
+            event_id: crypto.randomUUID(),
+            delegation_id: null,
+            content: `SHIKARI's GPS location updated: ${userLocation.city ? `${userLocation.city} ` : ""}(${userLocation.latitude.toFixed(4)}, ${userLocation.longitude.toFixed(4)})${userLocation.label ? ` near ${userLocation.label}` : ""}. Ready for navigation, distances, and directions.`,
+          });
+        }
         return;
       }
       if (event["type"] !== "gateway.heartbeat") {
