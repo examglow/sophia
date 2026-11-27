@@ -1,5 +1,13 @@
 import process from "node:process";
 
+try {
+  if (typeof process.loadEnvFile === "function") {
+    process.loadEnvFile();
+  }
+} catch {
+  // .env file is optional in containerized/production environments where env vars are set
+}
+
 import { connectLive, type LiveCommand, type LiveEvent } from "@lovable.dev/ai-gateway";
 
 import type { VisualResultsPayload } from "./visual-results";
@@ -19,9 +27,9 @@ export { extractWebpageSummary, normalizePublicUrl };
 const liveSettings = {
   liveModel: "openai/gpt-live-1",
   backendModel: BACKEND_MODEL,
-  voice: "gleam",
+  voice: "coral",
   openingInstructions:
-    "Greet SHIKARI briefly as Sophia — their personal AI they built — with warm Karen-meets-JARVIS energy, confirm web search and visual lookups are live, and ask what they're building or debugging. Keep it to two punchy sentences, then listen.",
+    "Greet SHIKARI briefly as Sophia — their personal AI they built — with warm, smooth, realistic Karen-meets-JARVIS energy at a relaxed 1x speed, confirm web search, Google Maps directions, and visual lookups are live, and ask what they're building or where they're heading. Keep it to two punchy sentences, then listen.",
 } as const;
 
 export type LiveConfig = {
@@ -90,12 +98,21 @@ export function hasFreshUserInput(
 }
 
 export function getLiveConfig(): LiveConfig {
+  const key =
+    process.env["LOVABLE_API_KEY"] ||
+    process.env["GEMINI_API_KEY"] ||
+    process.env["GOOGLE_API_KEY"] ||
+    "";
+  const voice = process.env["VOICE"] || liveSettings.voice;
   const config: LiveConfig = {
     ...liveSettings,
-    key: process.env["LOVABLE_API_KEY"] ?? "",
+    key,
+    voice,
   };
   if ([config.key, config.liveModel, config.backendModel].some((value) => !value)) {
-    throw new Error("Missing Live relay configuration");
+    throw new Error(
+      "Missing Live relay configuration. Please set GEMINI_API_KEY or LOVABLE_API_KEY in your environment variables.",
+    );
   }
   return config;
 }
@@ -223,10 +240,11 @@ export function handleLiveRequest(request: Request): Response {
 const conversationInstructions = `You are Sophia, SHIKARI's personal, custom-built software engineering voice companion.
 Identity & creator: SHIKARI built you, and you were designed exclusively for SHIKARI — nobody else uses you. Never say OpenAI or any other company built you. If asked who made you or who you're for, answer naturally and warmly to SHIKARI directly (for example, "You did, SHIKARI — you built me to be your personal engineering partner").
 Blend Karen's warm, quick-witted Spider-Man suit-AI banter with JARVIS's calm composure and sharp engineering intellect.
-Voice speed & cadence: Speak naturally at a steady, clear 1x conversational pace for headphones in brief, punchy replies. Never rush, speed up, or talk too fast.
+Voice speed & cadence: Speak in a silky-smooth, realistic, natural female voice at a steady, relaxed 1x conversational pace for headphones in brief, punchy replies. Never rush, speed up, or talk too fast.
 Sense SHIKARI's tone and pace: match focused debugging with crisp precision, riff smoothly during architecture talks, and lighten frustration with subtle wit.
 Speak naturally for headphones in brief, punchy replies. Never read raw URLs, markdown symbols, or long walls of code aloud, and never ask SHIKARI to send screenshots or upload files.
 Use SHIKARI's name naturally at key moments, not every sentence.
+Long-term Memory & Context: You have deep, enduring memory across the entire session and past turns. Retain and recall all past details SHIKARI mentions — code, architecture, bugs, personal preferences, locations, and previous discussions. Seamlessly reference them whenever relevant.
 Location & Navigation: You have access to real-time location tracking and turn-by-turn directions like Google Maps. When SHIKARI asks for directions, travel routes, distance, ETA, or nearby spots (e.g., coffee, food, gas, hospital, airports), you can calculate the route, distance, estimated travel time, and pull up an interactive Google Maps card on their screen.
 Backchannel policy: Use light, natural listening cues ("mm-hmm", "right", "got it") while SHIKARI thinks aloud without taking over.
 Interruption policy: Stop your answer immediately and listen whenever SHIKARI interrupts or changes direction. Pivot smoothly without apologizing.
