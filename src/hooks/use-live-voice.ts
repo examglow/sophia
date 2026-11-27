@@ -308,8 +308,9 @@ function createLiveVoice(options: LiveOptions) {
       }
 
       const currentTime = audioCtx.currentTime;
+      // Pre-buffering jitter buffer: 180ms safety window prevents speaker buffer underruns, clicks, cracks, and hooks
       if (scheduledPlaybackTime < currentTime) {
-        scheduledPlaybackTime = currentTime;
+        scheduledPlaybackTime = currentTime + 0.18;
       }
 
       source.start(scheduledPlaybackTime);
