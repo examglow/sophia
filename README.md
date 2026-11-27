@@ -1,24 +1,25 @@
-# Shikari Coding Companion
+# Sophia — AI Voice Companion
 
-https://github.com/examglow/shikari-s-coding-companion.git show me the preview also it says its web search is not working it gives it error fix its web search
+A personal real-time AI voice companion powered natively by **Google Gemini Multimodal Live API** (`models/gemini-3.8-live`), with real-time GPS location tracking, turn-by-turn routing, interactive Google Maps display, and web inspection.
 
-This project was built with [Lovable](https://lovable.dev).
+## Features
 
-## Build with Lovable
+- **Google Gemini Live Voice**: Direct bidirectional real-time audio streaming powered by `models/gemini-3.8-live` and the realistic `Kore` female voice at steady 1x conversational speed.
+- **Persistent Long-Term Memory**: Deep conversational context retention across turns.
+- **Turn-by-Turn Navigation & Maps**: Real-time GPS location tracking and interactive Google Maps route deck.
+- **Zero Third-Party Gateway Dependencies**: 100% native Google Gemini WebSockets (`generativelanguage.googleapis.com`).
 
-Continue developing this project in the [Lovable editor](https://lovable.dev/projects/83183f47-f605-4fe7-82e3-21ef0b56ca6f).
+## Deployment on Render
 
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: every change made in Lovable is committed straight to this repository.
-- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
-
-## Development
-
-Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).
-
-```sh
-git clone <this-repository-url>
-cd <repository-name>
-npm i
-npm run dev
-```
+1. **Build Command**:
+   ```bash
+   npm install && npm run build
+   ```
+2. **Start Command**:
+   ```bash
+   node .output/server/index.mjs
+   ```
+3. **Environment Variables**:
+   - `GEMINI_API_KEY`: Your Google AI Studio API key (`AQ...`)
+   - `GEMINI_VOICE`: `Kore` (default smooth natural female voice)
+   - `GEMINI_MODEL`: `models/gemini-3.8-live`

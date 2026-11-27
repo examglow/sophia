@@ -1,11 +1,4 @@
 import {
-  GatewayError,
-  streamResponse,
-  type ResponseFor,
-  type ResponsesFieldsByModel,
-} from "@lovable.dev/ai-gateway";
-
-import {
   getDirections,
   type UserLocation,
 } from "./directions.server";
@@ -17,15 +10,7 @@ import {
   type VisualResultsPayload,
 } from "./visual-results";
 
-export const BACKEND_MODEL = "openai/gpt-6.1-sol" as const;
-export type BackendModel = typeof BACKEND_MODEL;
-export type BackendInputItem = Exclude<
-  NonNullable<ResponsesFieldsByModel[BackendModel]["input"]>,
-  string
->[number];
-type BackendResponse = ResponseFor<"responses", BackendModel>;
-
-function isPrivateHost(hostname: string): boolean {
+export function isPrivateHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (
     host === "localhost" ||
@@ -248,19 +233,6 @@ export async function fetchWebpage(
   }
 }
 
-function fetchWebpageArguments(value: unknown): { url: string } {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    !("url" in value) ||
-    typeof value.url !== "string" ||
-    !value.url.trim()
-  ) {
-    throw new Error("Invalid fetch_webpage arguments");
-  }
-  return { url: value.url.trim() };
-}
-
 export function sanitizeVisualResultsInput(value: unknown): VisualResultsPayload {
   if (!value || typeof value !== "object") {
     throw new Error("Invalid show_visual_results arguments");
@@ -284,7 +256,7 @@ export function sanitizeVisualResultsInput(value: unknown): VisualResultsPayload
     const title = typeof row["title"] === "string" ? row["title"].trim().slice(0, 120) : "";
     if (!title) continue;
     const rawKind = row["kind"];
-    let kind: VisualResultKind =
+    const kind: VisualResultKind =
       rawKind === "video" || rawKind === "code" || rawKind === "link" || rawKind === "map"
         ? rawKind
         : "link";
@@ -348,7 +320,6 @@ export function sanitizeVisualResultsInput(value: unknown): VisualResultsPayload
     if (url) {
       const ytId = extractYouTubeVideoId(url);
       if (ytId) {
-        kind = "video";
         imageUrl = `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`;
       }
     }
@@ -383,7 +354,7 @@ export function sanitizeVisualResultsInput(value: unknown): VisualResultsPayload
   };
 }
 
-async function enrichVisualResults(
+export async function enrichVisualResults(
   payload: VisualResultsPayload,
   signal: AbortSignal,
 ): Promise<VisualResultsPayload> {
@@ -402,7 +373,7 @@ async function enrichVisualResults(
           discovered.set(item.id, page.imageUrl);
         }
       } catch {
-        // Best-effort thumbnail enrichment only; never fail search over a missing preview image.
+        // Best-effort thumbnail enrichment only
       }
     }),
   );
@@ -417,334 +388,7 @@ async function enrichVisualResults(
   };
 }
 
-export function filterReplayableOutput(
-  output: BackendResponse["output"],
-): BackendInputItem[] {
-  const kept: BackendInputItem[] = [];
-  for (const item of output) {
-    if (item.type === "message" || item.type === "reasoning" || item.type === "function_call") {
-      kept.push(item);
-      continue;
-    }
-    if (item.type === "web_search_call" && item.status === "completed") {
-      kept.push(item);
-    }
-  }
-  return kept;
-}
-
-export async function answerEngineeringQuestion(params: {
-  history: BackendInputItem[];
-  backendModel: BackendModel;
-  correlation: { runID: string; sessionID: string; delegationID: string };
-  signal: AbortSignal;
-  userLocation?: UserLocation;
-  takeNewInputs: () => BackendInputItem[];
-  onSearching: () => void;
-  onVisualResults: (payload: VisualResultsPayload) => void;
-}): Promise<{ answer: string; committedHistory: BackendInputItem[] }> {
-  const {
-    history,
-    backendModel,
-    correlation,
-    signal,
-    userLocation,
-    takeNewInputs,
-    onSearching,
-    onVisualResults,
-  } = params;
-  const working: BackendInputItem[] = [...history];
-  let searchAnnounced = false;
-
-  const announceSearch = () => {
-    if (searchAnnounced) return;
-    searchAnnounced = true;
-    onSearching();
-  };
-
-  const locationContext = userLocation
-    ? `SHIKARI's real-time GPS location: latitude ${userLocation.latitude.toFixed(4)}, longitude ${userLocation.longitude.toFixed(4)}${userLocation.city ? ` (${userLocation.city})` : ""}${userLocation.label ? ` near ${userLocation.label}` : ""}. When SHIKARI asks for directions, routes, how to get somewhere, nearby places, or travel times ('how do I get to Central Park', 'find coffee shops near me', 'nearest hospital'), ALWAYS call get_directions with the destination. It calculates real routes and displays an interactive Google Maps card on SHIKARI's screen. `
-    : "If SHIKARI asks for directions or nearby places, call get_directions with the destination to generate an interactive Google Maps route card. ";
-
-  for (let step = 0; step < 8; step++) {
-    signal.throwIfAborted();
-    const fresh = takeNewInputs();
-    if (fresh.length > 0) working.push(...fresh);
-
-    const stream = await streamResponse(
-      {
-        model: backendModel,
-        input: working,
-        instructions:
-          "You are the engineering research, web search, location, and visual results engine behind Sophia, SHIKARI's personal voice and text coding companion built by SHIKARI exclusively for SHIKARI. " +
-          "Never claim OpenAI or any other company built Sophia; SHIKARI built Sophia. " +
-          "Transcripts may be fragmented or corrected; always honor the latest correction. " +
-          locationContext +
-          "Use get_directions whenever SHIKARI asks for directions, travel routes, navigation, ETA, distance, or nearby places. " +
-          "Use web_search for web research, videos, tutorials, documentation, package versions, changelogs, errors, news, and current facts. " +
-          "Use fetch_webpage ONLY when SHIKARI explicitly mentions a specific website, domain, or URL (e.g., calvras.com, examglow.com) or when you need to inspect a specific page's content directly. " +
-          "VISUAL RESULTS RULE: Whenever SHIKARI asks to show something ('show me', 'find me videos', 'pull up', 'search for videos/tutorials/repos/articles/docs/examples'), or when web_search finds visual or browsable links (like YouTube videos, official docs, GitHub repos, or websites worth opening), ALWAYS call show_visual_results with the real verified URLs before giving your final spoken summary. " +
-          "Never invent or guess URLs — every URL in show_visual_results must come from web_search or fetch_webpage. " +
-          "Your final text response is ONLY spoken aloud by Sophia (never shown as text on screen), so return crisp, natural spoken prose (at most 120 words) with no markdown bold, no bullets, no raw URLs, and no code fences. If you gave directions or showed visual cards, briefly refer to them naturally ('I pulled up the route and Google Maps on your screen...').",
-        reasoning: { effort: "medium", summary: "auto" },
-        include: ["reasoning.encrypted_content", "web_search_call.action.sources"],
-        tools: [
-          { type: "web_search", external_web_access: true, search_context_size: "medium" },
-          {
-            type: "function",
-            name: "get_directions",
-            parameters: {
-              type: "object",
-              properties: {
-                destination: {
-                  type: "string",
-                  description:
-                    "Destination place, business, address, or landmark SHIKARI wants directions to or places near them (e.g. 'Central Park', 'Starbucks', 'nearest hospital', 'Times Square').",
-                },
-                mode: {
-                  type: "string",
-                  enum: ["driving", "walking", "bicycling"],
-                  description: "Travel mode (defaults to 'driving').",
-                },
-              },
-              required: ["destination"],
-              additionalProperties: false,
-            },
-            strict: true,
-          },
-          {
-            type: "function",
-            name: "fetch_webpage",
-            parameters: {
-              type: "object",
-              properties: {
-                url: {
-                  type: "string",
-                  description:
-                    "Public HTTP/HTTPS URL or domain name to fetch live (e.g. https://calvras.com).",
-                },
-              },
-              required: ["url"],
-              additionalProperties: false,
-            },
-            strict: true,
-          },
-          {
-            type: "function",
-            name: "show_visual_results",
-            parameters: {
-              type: "object",
-              properties: {
-                heading: {
-                  type: "string",
-                  description:
-                    "Short 2-6 word heading for the visual cards (e.g. 'Helpful videos', 'React 19 docs').",
-                },
-                query_label: {
-                  type: "string",
-                  description: "Brief label summarizing what SHIKARI asked for.",
-                },
-                items: {
-                  type: "array",
-                  minItems: 1,
-                  maxItems: 6,
-                  items: {
-                    type: "object",
-                    properties: {
-                      kind: { type: "string", enum: ["video", "link", "code", "map"] },
-                      title: { type: "string" },
-                      subtitle: { type: ["string", "null"] },
-                      url: { type: ["string", "null"] },
-                      image_url: { type: ["string", "null"] },
-                      code: { type: ["string", "null"] },
-                      language: { type: ["string", "null"] },
-                    },
-                    required: [
-                      "kind",
-                      "title",
-                      "subtitle",
-                      "url",
-                      "image_url",
-                      "code",
-                      "language",
-                    ],
-                    additionalProperties: false,
-                  },
-                },
-              },
-              required: ["heading", "query_label", "items"],
-              additionalProperties: false,
-            },
-            strict: true,
-          },
-        ],
-      },
-      {
-        signal,
-        runId: correlation.runID,
-        metadata: {
-          live_session_id: correlation.sessionID,
-          delegation_id: correlation.delegationID,
-        },
-      },
-    );
-
-    let completed: BackendResponse | undefined;
-    let incompleteReason: string | undefined;
-
-    for await (const event of stream) {
-      if (
-        event.type === "response.web_search_call.in_progress" ||
-        event.type === "response.web_search_call.searching"
-      ) {
-        announceSearch();
-      }
-      if (event.type === "response.completed") completed = event.response;
-      if (event.type === "response.incomplete") {
-        incompleteReason = event.response.incomplete_details?.reason ?? "incomplete";
-      }
-    }
-
-    signal.throwIfAborted();
-    if (incompleteReason || !completed || completed.status !== "completed") {
-      throw new Error(`Backend response did not complete (${incompleteReason ?? completed?.status ?? "missing"})`);
-    }
-
-    working.push(...filterReplayableOutput(completed.output));
-
-    const calls = completed.output.filter((item) => item.type === "function_call");
-    if (calls.length > 0) {
-      for (const call of calls) {
-        signal.throwIfAborted();
-        let output: unknown;
-        if (call.name === "fetch_webpage") {
-          announceSearch();
-          try {
-            const { url } = fetchWebpageArguments(JSON.parse(call.arguments));
-            output = await fetchWebpage(url, signal);
-          } catch (err) {
-            if (signal.aborted) throw err;
-            output = {
-              ok: false,
-              error: err instanceof Error ? err.message : "Could not load webpage",
-            };
-          }
-        } else if (call.name === "get_directions") {
-          announceSearch();
-          try {
-            const args = JSON.parse(call.arguments) as {
-              destination: string;
-              mode?: "driving" | "walking" | "bicycling";
-            };
-            const route = await getDirections({
-              origin: userLocation
-                ? {
-                    lat: userLocation.latitude,
-                    lon: userLocation.longitude,
-                    label: userLocation.label || userLocation.city,
-                  }
-                : undefined,
-              destinationQuery: args.destination,
-              mode: args.mode || "driving",
-              signal,
-            });
-
-            const visualPayload: VisualResultsPayload = {
-              heading: `Directions to ${route.destination}`,
-              queryLabel: `${route.distance} • ${route.duration} • ${route.mode}`,
-              items: [
-                {
-                  id: `map-${Date.now()}`,
-                  kind: "map",
-                  title: `Directions to ${route.destination}`,
-                  subtitle: `${route.duration} (${route.distance}) via ${route.mode}`,
-                  url: route.googleMapsUrl,
-                  destination: route.destination,
-                  origin: route.origin,
-                  distance: route.distance,
-                  duration: route.duration,
-                  mode: route.mode,
-                  steps: route.steps.map((s) => s.instruction),
-                  embedUrl: route.embedUrl,
-                  lat: route.destCoords?.lat,
-                  lng: route.destCoords?.lon,
-                },
-              ],
-            };
-            onVisualResults(visualPayload);
-
-            output = {
-              ok: true,
-              origin: route.origin,
-              destination: route.destination,
-              distance: route.distance,
-              duration: route.duration,
-              mode: route.mode,
-              steps: route.steps.slice(0, 6).map((s) => s.instruction),
-              googleMapsUrl: route.googleMapsUrl,
-            };
-          } catch (err) {
-            if (signal.aborted) throw err;
-            output = {
-              ok: false,
-              error: err instanceof Error ? err.message : "Could not calculate directions",
-            };
-          }
-        } else if (call.name === "show_visual_results") {
-          try {
-            const sanitized = sanitizeVisualResultsInput(JSON.parse(call.arguments));
-            const enriched = await enrichVisualResults(sanitized, signal);
-            onVisualResults(enriched);
-            output = { ok: true, displayedCount: enriched.items.length };
-          } catch (err) {
-            if (signal.aborted) throw err;
-            output = {
-              ok: false,
-              error: err instanceof Error ? err.message : "Could not display visual results",
-            };
-          }
-        } else {
-          output = { ok: false, error: "Unsupported tool" };
-        }
-        working.push({
-          type: "function_call_output",
-          call_id: call.call_id,
-          output: JSON.stringify(output),
-        });
-      }
-      continue;
-    }
-
-    const answer = completed.output
-      .flatMap((item) =>
-        item.type === "message"
-          ? item.content.flatMap((part) => (part.type === "output_text" ? [part.text] : []))
-          : [],
-      )
-      .join("\n")
-      .trim();
-    if (!answer) throw new Error("The backend response had no answer");
-    return { answer, committedHistory: working };
-  }
-  throw new Error("The backend task exceeded its step limit");
-}
-
 export function describeLookupError(error: unknown): string {
-  if (error instanceof GatewayError) {
-    console.error("[Sophia lookup GatewayError]", {
-      code: error.code,
-      httpStatus: error.httpStatus,
-      outcome: error.outcome,
-      ids: error.ids,
-    });
-    if (error.httpStatus === 402) {
-      return "AI credits are depleted — please top up credits to use web search.";
-    }
-    if (error.httpStatus === 429) {
-      return "Web search is temporarily rate-limited. Try again in a few seconds.";
-    }
-    return "Web search hit a temporary service error.";
-  }
   console.error("[Sophia lookup error]", error instanceof Error ? error.message : String(error));
-  return "Web search ran into a snag. Try asking again.";
+  return "Lookup ran into an error. Try asking again.";
 }

@@ -8,8 +8,8 @@ export type LiveEvent = {
   error?: { message?: string };
   usage?: { seconds?: number };
   finalized?: boolean;
-  transport?: { type?: string; sdp?: string };
   payload?: VisualResultsPayload;
+  text?: string;
   [key: string]: unknown;
 };
 
@@ -71,11 +71,6 @@ export function useLiveVoice(
 
   const start = useCallback((startOptions?: StartCallOptions) => {
     if (!mounted.current || controller.current) return;
-    const audio = audioRef.current;
-    if (!audio) {
-      setCall((previous) => ({ ...previous, error: "Voice playback is not mounted." }));
-      return;
-    }
     let endpoint: URL;
     try {
       endpoint = new URL(latest.current.url ?? "/api/live", window.location.href);
@@ -87,9 +82,9 @@ export function useLiveVoice(
     }
     const startMuted = Boolean(startOptions?.startMuted);
     const initialText = startOptions?.initialText?.trim() || undefined;
+
     const voice = createLiveVoice({
       url: endpoint.href,
-      audio,
       startMuted,
       ...(initialText ? { initialText } : {}),
       onEvent(event) {
@@ -127,6 +122,7 @@ export function useLiveVoice(
         }
       },
     });
+
     controller.current = voice;
     setCall({ ...initialState, status: "connecting", muted: startMuted });
     void voice.start();
@@ -159,13 +155,12 @@ export function useLiveVoice(
 
 type LiveOptions = {
   url: string;
-  audio: HTMLAudioElement;
   startMuted: boolean;
   initialText?: string;
   onEvent: (event: LiveEvent) => void;
 };
 
-function sampleRms(analyser: AnalyserNode, buffer: Uint8Array<ArrayBuffer>): number {
+function sampleRms(analyser: AnalyserNode, buffer: Uint8Array): number {
   analyser.getByteTimeDomainData(buffer);
   let sum = 0;
   for (let i = 0; i < buffer.length; i++) {
@@ -175,7 +170,7 @@ function sampleRms(analyser: AnalyserNode, buffer: Uint8Array<ArrayBuffer>): num
   return Math.min(1, Math.sqrt(sum / buffer.length) * 3.2);
 }
 
-function sampleBands(analyser: AnalyserNode, buffer: Uint8Array<ArrayBuffer>): number[] {
+function sampleBands(analyser: AnalyserNode, buffer: Uint8Array): number[] {
   analyser.getByteFrequencyData(buffer);
   const out: number[] = [];
   const count = 8;
@@ -189,72 +184,47 @@ function sampleBands(analyser: AnalyserNode, buffer: Uint8Array<ArrayBuffer>): n
   return out;
 }
 
+// Convert base64 string to Uint8Array
+function base64ToUint8(base64: string): Uint8Array {
+  const binaryString = atob(base64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
+// Convert ArrayBuffer to base64 string
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
 function createLiveVoice(options: LiveOptions) {
   let state: "idle" | "starting" | "active" | "stopping" | "closed" = "idle";
   let socket: WebSocket | undefined;
-  let peer: RTCPeerConnection | undefined;
-  let channel: RTCDataChannel | undefined;
   let microphone: MediaStream | undefined;
-  let playback: MediaStream | undefined;
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
-  let deadline: ReturnType<typeof setTimeout> | undefined;
-  let cancelGathering: (() => void) | undefined;
-  let lastAck = 0;
-  let lastHeartbeat = 0;
-  let answerReceived = false;
-  let finalized = false;
   let muted = options.startMuted;
 
-  let audioCtx: AudioContext | undefined;
+  // Web Audio Contexts
+  let micAudioCtx: AudioContext | undefined;
+  let playAudioCtx: AudioContext | undefined;
   let inputAnalyser: AnalyserNode | undefined;
   let outputAnalyser: AnalyserNode | undefined;
-  let inputTimeBuf: Uint8Array<ArrayBuffer> | undefined;
-  let outputTimeBuf: Uint8Array<ArrayBuffer> | undefined;
-  let freqBuf: Uint8Array<ArrayBuffer> | undefined;
+  let inputTimeBuf: Uint8Array | undefined;
+  let outputTimeBuf: Uint8Array | undefined;
+  let freqBuf: Uint8Array | undefined;
 
-  function ensureAudioContext(): AudioContext | undefined {
-    if (audioCtx) return audioCtx;
-    try {
-      audioCtx = new AudioContext();
-      return audioCtx;
-    } catch {
-      return undefined;
-    }
-  }
+  let scheduledPlaybackTime = 0;
+  let activeSources: AudioBufferSourceNode[] = [];
 
-  function attachMeter(stream: MediaStream, kind: "input" | "output") {
-    const ctx = ensureAudioContext();
-    if (!ctx) return;
-    try {
-      if (ctx.state === "suspended") void ctx.resume().catch(() => {});
-      const source = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      analyser.smoothingTimeConstant = 0.78;
-      source.connect(analyser);
-      if (kind === "input") {
-        inputAnalyser = analyser;
-        inputTimeBuf = new Uint8Array(new ArrayBuffer(analyser.fftSize));
-      } else {
-        outputAnalyser = analyser;
-        outputTimeBuf = new Uint8Array(new ArrayBuffer(analyser.fftSize));
-        freqBuf = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
-      }
-    } catch {
-      // Audio metering is strictly visual; never disrupt call media.
-    }
-  }
-
-  function closeAudioContext() {
-    inputAnalyser = undefined;
-    outputAnalyser = undefined;
-    inputTimeBuf = undefined;
-    outputTimeBuf = undefined;
-    freqBuf = undefined;
-    const ctx = audioCtx;
-    audioCtx = undefined;
-    if (ctx && ctx.state !== "closed") {
-      void ctx.close().catch(() => {});
+  function send(event: object) {
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(event));
     }
   }
 
@@ -270,35 +240,88 @@ function createLiveVoice(options: LiveOptions) {
     return { input, output, bands };
   }
 
-  function starting() {
-    return state === "starting";
+  function playPcmChunk(base64Pcm: string) {
+    if (!playAudioCtx) return;
+    try {
+      if (playAudioCtx.state === "suspended") {
+        void playAudioCtx.resume().catch(() => {});
+      }
+
+      const pcmBytes = base64ToUint8(base64Pcm);
+      const int16 = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength / 2);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) {
+        float32[i] = int16[i] / 32768.0;
+      }
+
+      const audioBuffer = playAudioCtx.createBuffer(1, float32.length, 24000);
+      audioBuffer.getChannelData(0).set(float32);
+
+      const source = playAudioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.playbackRate.value = 1.0;
+
+      if (outputAnalyser) {
+        source.connect(outputAnalyser);
+        outputAnalyser.connect(playAudioCtx.destination);
+      } else {
+        source.connect(playAudioCtx.destination);
+      }
+
+      const currentTime = playAudioCtx.currentTime;
+      if (scheduledPlaybackTime < currentTime) {
+        scheduledPlaybackTime = currentTime;
+      }
+
+      source.start(scheduledPlaybackTime);
+      scheduledPlaybackTime += audioBuffer.duration;
+
+      activeSources.push(source);
+      source.onended = () => {
+        activeSources = activeSources.filter((s) => s !== source);
+      };
+    } catch (err) {
+      console.error("[AudioPlayback] Error playing PCM chunk:", err);
+    }
   }
 
-  function send(event: object) {
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event));
+  function stopAllPlayback() {
+    for (const source of activeSources) {
+      try {
+        source.stop();
+        source.disconnect();
+      } catch {
+        // ignore already stopped
+      }
+    }
+    activeSources = [];
+    if (playAudioCtx) {
+      scheduledPlaybackTime = playAudioCtx.currentTime;
+    }
   }
 
   function stopAudio() {
-    closeAudioContext();
+    stopAllPlayback();
     microphone?.getTracks().forEach((track) => track.stop());
-    if (playback && options.audio.srcObject === playback) {
-      options.audio.pause();
-      options.audio.srcObject = null;
+
+    if (micAudioCtx && micAudioCtx.state !== "closed") {
+      void micAudioCtx.close().catch(() => {});
     }
+    if (playAudioCtx && playAudioCtx.state !== "closed") {
+      void playAudioCtx.close().catch(() => {});
+    }
+    micAudioCtx = undefined;
+    playAudioCtx = undefined;
+    inputAnalyser = undefined;
+    outputAnalyser = undefined;
   }
 
   function release() {
     if (state === "closed") return;
     state = "closed";
-    clearInterval(heartbeat);
-    clearTimeout(deadline);
-    cancelGathering?.();
-    window.removeEventListener("pagehide", stop);
     stopAudio();
-    channel?.close();
-    peer?.close();
     socket?.close();
-    options.onEvent({ type: "app.closed", finalized });
+    options.onEvent({ type: "app.closed" });
   }
 
   function stop() {
@@ -309,34 +332,21 @@ function createLiveVoice(options: LiveOptions) {
     } catch {
       return release();
     }
-    stopAudio();
-    cancelGathering?.();
-    clearInterval(heartbeat);
-    clearTimeout(deadline);
-    deadline = setTimeout(release, 15_000);
     options.onEvent({ type: "app.stopping" });
-    if (!socket || socket.readyState !== WebSocket.OPEN) release();
+    release();
   }
 
   function setMuted(value: boolean) {
-    if (state !== "starting" && state !== "active") return false;
     muted = value;
     microphone?.getAudioTracks().forEach((track) => {
       track.enabled = !muted;
     });
-    if (state === "active") {
-      try {
-        send({ type: "app.mute", muted });
-      } catch {
-        // Keep mute functional locally even if socket is closing.
-      }
-    }
     return true;
   }
 
   function sendText(text: string): boolean {
     const trimmed = text.trim();
-    if (!trimmed || state !== "active" || socket?.readyState !== WebSocket.OPEN) return false;
+    if (!trimmed || socket?.readyState !== WebSocket.OPEN) return false;
     try {
       send({ type: "app.text_input", text: trimmed });
       return true;
@@ -362,17 +372,9 @@ function createLiveVoice(options: LiveOptions) {
   }
 
   async function resumePlayback() {
-    if ((state !== "starting" && state !== "active") || !options.audio.srcObject) return;
-    try {
-      if (audioCtx?.state === "suspended") void audioCtx.resume().catch(() => {});
-      await options.audio.play();
-      if (state === "starting" || state === "active") {
-        options.onEvent({ type: "app.playback.resumed" });
-      }
-    } catch {
-      if (state === "starting" || state === "active") {
-        options.onEvent({ type: "app.playback.blocked" });
-      }
+    if (playAudioCtx?.state === "suspended") {
+      await playAudioCtx.resume();
+      options.onEvent({ type: "app.playback.resumed" });
     }
   }
 
@@ -382,203 +384,109 @@ function createLiveVoice(options: LiveOptions) {
     stop();
   }
 
-  function reportUnexpectedClosure(reason?: string) {
-    if (state === "stopping" || state === "closed") return;
-    const messages: Record<string, string> = {
-      startup_timeout: "Voice startup timed out. Tap to retry.",
-      initial_heartbeat_timeout: "Voice media did not connect. Tap to retry.",
-      heartbeat_timeout: "Voice connection was lost. Tap to retry.",
-      gateway_shutdown: "The voice service restarted. Tap to reconnect.",
-      inactivity_timeout: "The voice call ended after inactivity.",
-      duration_limit: "The voice call reached its duration limit. Tap to continue.",
-    };
-    options.onEvent({
-      type: "app.error",
-      error: {
-        message:
-          messages[reason ?? ""] ?? "The voice call ended unexpectedly. Tap to retry.",
-      },
-    });
-  }
-
-  function mediaReady() {
-    return peer?.connectionState === "connected" && channel?.readyState === "open";
-  }
-
-  function pulse() {
-    if (state !== "active") return;
-    if (Date.now() - lastAck >= 5000) return fail("Voice control connection lost");
-    if (Date.now() - lastHeartbeat >= 5000) return fail("Voice media connection lost");
-    if (!mediaReady()) return;
-    try {
-      send({ type: "gateway.heartbeat" });
-      lastHeartbeat = Date.now();
-    } catch {
-      fail("Voice control connection failed");
-    }
-  }
-
-  function activate() {
-    if (!answerReceived || !mediaReady()) return;
-    if (starting()) {
-      state = "active";
-      clearTimeout(deadline);
-      lastAck = Date.now();
-      lastHeartbeat = Date.now();
-      heartbeat = setInterval(pulse, 1000);
-      pulse();
-      if (state !== "active") return;
-      send({ type: "app.ready" });
-      if (muted) send({ type: "app.mute", muted: true });
-      options.onEvent({ type: "app.connected" });
-    } else pulse();
-  }
-
-  async function applyAnswer(event: LiveEvent) {
-    if (!starting() || !peer) return;
-    if (answerReceived || event.transport?.type !== "webrtc" || !event.transport.sdp) {
-      throw new Error("Invalid voice session answer");
-    }
-    answerReceived = true;
-    clearTimeout(deadline);
-    deadline = setTimeout(
-      () => fail("Voice media did not connect within 12 seconds. Tap to retry."),
-      12_000,
-    );
-    await peer.setRemoteDescription({ type: "answer", sdp: event.transport.sdp });
-    activate();
-  }
-
-  async function gatherCandidates(connection: RTCPeerConnection) {
-    if (connection.iceGatheringState === "complete") return;
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => finish(new Error("Voice network setup timed out")), 10_000);
-      function finish(error?: Error) {
-        clearTimeout(timeout);
-        connection.removeEventListener("icegatheringstatechange", changed);
-        cancelGathering = undefined;
-        if (error) reject(error);
-        else resolve();
-      }
-      function changed() {
-        if (connection.iceGatheringState === "complete") finish();
-      }
-      cancelGathering = () => finish(new Error("Call ended"));
-      connection.addEventListener("icegatheringstatechange", changed);
-      changed();
-    });
-  }
-
   async function start() {
     if (state !== "idle") return;
     state = "starting";
-    window.addEventListener("pagehide", stop);
+
     try {
+      // 1. Setup AudioContext for playback (24kHz for Gemini output)
+      const PlayContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      playAudioCtx = new PlayContextClass({ sampleRate: 24000 });
+      if (playAudioCtx.state === "suspended") {
+        void playAudioCtx.resume().catch(() => {});
+      }
+
+      outputAnalyser = playAudioCtx.createAnalyser();
+      outputAnalyser.fftSize = 256;
+      outputAnalyser.smoothingTimeConstant = 0.78;
+      outputTimeBuf = new Uint8Array(outputAnalyser.fftSize);
+      freqBuf = new Uint8Array(outputAnalyser.frequencyBinCount);
+
+      // 2. Request microphone stream
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
       });
       microphone = stream;
-      if (!starting()) {
-        stream.getTracks().forEach((track) => track.stop());
-        return;
-      }
-      attachMeter(stream, "input");
-      const connection = new RTCPeerConnection();
-      peer = connection;
-      for (const track of stream.getAudioTracks()) {
-        track.enabled = !muted;
-        track.addEventListener("ended", stop);
-        connection.addTrack(track, stream);
-      }
-      connection.addEventListener("track", ({ track }) => {
-        if (state === "stopping" || state === "closed") return;
-        playback = new MediaStream([track]);
-        options.audio.srcObject = playback;
-        options.audio.defaultPlaybackRate = 1.0;
-        options.audio.playbackRate = 1.0;
-        attachMeter(playback, "output");
-        void resumePlayback();
-      });
-      connection.addEventListener("connectionstatechange", () => {
-        if (connection.connectionState === "failed") {
-          fail("Voice media connection failed. Tap to retry.");
-        } else if (connection.connectionState === "closed") {
-          fail("Voice media connection closed");
-        } else activate();
-      });
-      channel = connection.createDataChannel("oai-events");
-      channel.addEventListener("open", activate);
-      channel.addEventListener("message", ({ data }) => {
-        try {
-          const event: LiveEvent = JSON.parse(data);
-          if (event.type === "session.started") {
-            activate();
-          }
-        } catch {
-          fail("Invalid voice session event");
+
+      // 3. Setup mic AudioContext (16kHz for Gemini input)
+      micAudioCtx = new PlayContextClass({ sampleRate: 16000 });
+      const micSource = micAudioCtx.createMediaStreamSource(stream);
+
+      inputAnalyser = micAudioCtx.createAnalyser();
+      inputAnalyser.fftSize = 256;
+      inputAnalyser.smoothingTimeConstant = 0.78;
+      inputTimeBuf = new Uint8Array(inputAnalyser.fftSize);
+      micSource.connect(inputAnalyser);
+
+      // 4. Capture 16kHz PCM audio and send to WebSocket
+      const processor = micAudioCtx.createScriptProcessor(4096, 1, 1);
+      processor.onaudioprocess = (e) => {
+        if (muted || state !== "active" || socket?.readyState !== WebSocket.OPEN) return;
+        const input = e.inputBuffer.getChannelData(0);
+        const pcm16 = new Int16Array(input.length);
+        for (let i = 0; i < input.length; i++) {
+          const s = Math.max(-1, Math.min(1, input[i]));
+          pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
         }
-      });
-      channel.addEventListener("error", () => fail("Voice media connection failed"));
-      channel.addEventListener("close", stop);
-      await connection.setLocalDescription(await connection.createOffer());
-      if (!starting()) return;
-      await gatherCandidates(connection);
-      if (!starting()) return;
-      const sdp = connection.localDescription?.sdp;
-      if (!sdp) throw new Error("Missing voice session offer");
+        send({
+          type: "input_audio",
+          pcm: arrayBufferToBase64(pcm16.buffer),
+        });
+      };
+      micSource.connect(processor);
+      processor.connect(micAudioCtx.destination);
+
+      // 5. Connect WebSocket to server
       socket = new WebSocket(options.url);
-      deadline = setTimeout(() => fail("Voice session did not start"), 50_000);
+
       socket.onopen = () => {
-        if (!starting()) return release();
         send({
           type: "app.start",
-          sdp,
           ...(options.initialText ? { initialText: options.initialText } : {}),
         });
       };
+
       socket.onmessage = ({ data }) => {
         try {
           const event: LiveEvent = JSON.parse(data);
-          if (event.type === "gateway.session.created") {
-            void applyAnswer(event).catch(() => fail("Voice media negotiation failed"));
-          } else if (event.type === "session.started") {
-            activate();
-          } else if (event.type === "gateway.heartbeat.ack") {
-            lastAck = Date.now();
-          } else if (event.type === "session.closed") {
-            finalized =
-              typeof event.usage?.seconds === "number" &&
-              Number.isFinite(event.usage.seconds) &&
-              event.usage.seconds >= 0;
-            reportUnexpectedClosure(event.reason);
+
+          if (event.type === "app.connected") {
+            state = "active";
+            options.onEvent({ type: "app.connected" });
+          } else if (event.type === "output_audio" && typeof event.pcm === "string") {
+            playPcmChunk(event.pcm);
+          } else if (event.type === "app.playback.interrupted") {
+            stopAllPlayback();
+          } else if (event.type === "app.visual.results") {
             options.onEvent(event);
-            return release();
-          } else if (
-            event.type === "gateway.session.closing" ||
-            event.type === "gateway.error" ||
-            event.type === "app.error"
-          ) {
-            if (event.type === "gateway.session.closing") reportUnexpectedClosure(event.reason);
+          } else if (event.type === "app.delegation.searching" || event.type === "app.delegation.completed") {
             options.onEvent(event);
-            return stop();
+          } else if (event.type === "app.error") {
+            options.onEvent(event);
+          } else if (event.type === "app.closed") {
+            release();
           }
-          options.onEvent(event);
-        } catch {
-          fail("Invalid voice event");
+        } catch (err) {
+          console.error("[LiveClient] Error parsing message:", err);
         }
       };
-      socket.onerror = () => fail("Voice connection failed");
+
+      socket.onerror = () => fail("Voice connection failed. Tap to retry.");
       socket.onclose = () => {
         if (state !== "stopping" && state !== "closed") {
           options.onEvent({
             type: "app.error",
-            error: { message: "Voice control connection closed" },
+            error: { message: "Voice connection closed" },
           });
         }
         release();
       };
-    } catch (error) {
-      fail(error instanceof Error ? error.message : "Microphone startup failed");
+    } catch (err) {
+      fail(err instanceof Error ? err.message : "Microphone access failed");
     }
   }
 

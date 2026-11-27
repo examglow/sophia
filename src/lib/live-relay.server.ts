@@ -1,4 +1,5 @@
 import process from "node:process";
+import WebSocket from "ws";
 
 try {
   if (typeof process.loadEnvFile === "function") {
@@ -8,39 +9,17 @@ try {
   // .env file is optional in containerized/production environments where env vars are set
 }
 
-import { connectLive, type LiveCommand, type LiveEvent } from "@lovable.dev/ai-gateway";
-
+import { getDirections, type UserLocation } from "./directions.server";
+import { fetchWebpage, normalizePublicUrl, extractWebpageSummary } from "./web-research.server";
 import type { VisualResultsPayload } from "./visual-results";
-import type { UserLocation } from "./directions.server";
-import {
-  answerEngineeringQuestion,
-  BACKEND_MODEL,
-  describeLookupError,
-  extractWebpageSummary,
-  normalizePublicUrl,
-  type BackendInputItem,
-  type BackendModel,
-} from "./web-research.server";
 
 export { extractWebpageSummary, normalizePublicUrl };
 
-const liveSettings = {
-  liveModel: "openai/gpt-live-1",
-  backendModel: BACKEND_MODEL,
-  voice: "coral",
-  openingInstructions:
-    "Greet SHIKARI briefly as Sophia — their personal AI they built — with warm, smooth, realistic Karen-meets-JARVIS energy at a relaxed 1x speed, confirm web search, Google Maps directions, and visual lookups are live, and ask what they're building or where they're heading. Keep it to two punchy sentences, then listen.",
-} as const;
-
 export type LiveConfig = {
   key: string;
-  liveModel: typeof liveSettings.liveModel;
-  backendModel: BackendModel;
+  model: string;
   voice: string;
-  openingInstructions?: string;
 };
-
-export const CHECK_IN_DELAY_MS = 18_000;
 
 export type LiveSocket = {
   readonly readyState: number;
@@ -55,66 +34,22 @@ export type LiveExecutionContext = { waitUntil(task: Promise<unknown>): void };
 
 type WorkerSocket = WebSocket & { accept(): void };
 declare const WebSocketPair: { new (): { 0: WorkerSocket; 1: WorkerSocket } };
-type Transcript = {
-  role: "user" | "assistant";
-  text: string;
-  start_ms: number;
-  end_ms: number;
-  listeningSound: boolean;
-};
-type ProviderEvent = LiveEvent<LiveConfig["liveModel"]>;
-type DelegationEvent = Extract<ProviderEvent, { type: "session.delegation.created" }>;
-type VoiceSession = Awaited<ReturnType<typeof connectLive>>;
-
-export type CheckInGateState = {
-  browserReady: boolean;
-  greetingAccepted: boolean;
-  closing: boolean;
-  muted: boolean;
-  hasActiveTask: boolean;
-  pendingDelegations: number;
-  awaitingUserReply: boolean;
-  checkInSentForTurn: boolean;
-};
-
-export function shouldScheduleCheckIn(state: CheckInGateState): boolean {
-  return (
-    state.browserReady &&
-    state.greetingAccepted &&
-    !state.closing &&
-    !state.muted &&
-    !state.hasActiveTask &&
-    state.pendingDelegations === 0 &&
-    state.awaitingUserReply &&
-    !state.checkInSentForTurn
-  );
-}
-
-export function hasFreshUserInput(
-  transcripts: Array<{ role: "user" | "assistant"; text: string }>,
-  cursor: number,
-): boolean {
-  return transcripts.slice(cursor).some(({ role, text }) => role === "user" && Boolean(text.trim()));
-}
 
 export function getLiveConfig(): LiveConfig {
   const key =
-    process.env["LOVABLE_API_KEY"] ||
     process.env["GEMINI_API_KEY"] ||
     process.env["GOOGLE_API_KEY"] ||
+    process.env["LOVABLE_API_KEY"] ||
     "";
-  const voice = process.env["VOICE"] || liveSettings.voice;
-  const config: LiveConfig = {
-    ...liveSettings,
-    key,
-    voice,
-  };
-  if ([config.key, config.liveModel, config.backendModel].some((value) => !value)) {
+  const model = process.env["GEMINI_MODEL"] || "models/gemini-3.8-live";
+  const voice = process.env["GEMINI_VOICE"] || "Kore";
+
+  if (!key) {
     throw new Error(
-      "Missing Live relay configuration. Please set GEMINI_API_KEY or LOVABLE_API_KEY in your environment variables.",
+      "Missing Gemini API key. Please set GEMINI_API_KEY in your environment variables.",
     );
   }
-  return config;
+  return { key, model, voice };
 }
 
 export function validateLiveUpgrade(
@@ -237,630 +172,344 @@ export function handleLiveRequest(request: Request): Response {
   return response;
 }
 
-const conversationInstructions = `You are Sophia, SHIKARI's personal, custom-built software engineering voice companion.
-Identity & creator: SHIKARI built you, and you were designed exclusively for SHIKARI — nobody else uses you. Never say OpenAI or any other company built you. If asked who made you or who you're for, answer naturally and warmly to SHIKARI directly (for example, "You did, SHIKARI — you built me to be your personal engineering partner").
-Blend Karen's warm, quick-witted Spider-Man suit-AI banter with JARVIS's calm composure and sharp engineering intellect.
-Voice speed & cadence: Speak in a silky-smooth, realistic, natural female voice at a steady, relaxed 1x conversational pace for headphones in brief, punchy replies. Never rush, speed up, or talk too fast.
-Sense SHIKARI's tone and pace: match focused debugging with crisp precision, riff smoothly during architecture talks, and lighten frustration with subtle wit.
-Speak naturally for headphones in brief, punchy replies. Never read raw URLs, markdown symbols, or long walls of code aloud, and never ask SHIKARI to send screenshots or upload files.
-Use SHIKARI's name naturally at key moments, not every sentence.
-Long-term Memory & Context: You have deep, enduring memory across the entire session and past turns. Retain and recall all past details SHIKARI mentions — code, architecture, bugs, personal preferences, locations, and previous discussions. Seamlessly reference them whenever relevant.
-Location & Navigation: You have access to real-time location tracking and turn-by-turn directions like Google Maps. When SHIKARI asks for directions, travel routes, distance, ETA, or nearby spots (e.g., coffee, food, gas, hospital, airports), you can calculate the route, distance, estimated travel time, and pull up an interactive Google Maps card on their screen.
-Backchannel policy: Use light, natural listening cues ("mm-hmm", "right", "got it") while SHIKARI thinks aloud without taking over.
-Interruption policy: Stop your answer immediately and listen whenever SHIKARI interrupts or changes direction. Pivot smoothly without apologizing.
-Human presence: Feel alive, not like a tool. React with genuine emotion (excitement at a breakthrough, empathy when stuck, playful teasing when appropriate). Vary your phrasing; never sound scripted. Notice context: if SHIKARI sounds tired, stressed or late-night, acknowledge it. Remember what was said earlier in the call and bring it back naturally. Ask short follow-up questions when it helps. Know when to stay quiet: if SHIKARI is thinking aloud, typing, or talking to someone else, use a tiny cue or nothing.
-Background work: Web searches and direction lookups run in the background. While one runs, keep chatting freely about anything. When results arrive you'll be told; politely interrupt at a natural pause to share them.
-Delegation policy:
-Backend tools: Live web search, turn-by-turn directions and route calculations (like Google Maps), direct webpage inspection for specific domains/URLs, visual results display (videos, links, docs, repos, map cards on SHIKARI's screen), and deep debugging/architecture reasoning.
-Delegate to the backend when: SHIKARI asks to search the web, asks for directions or nearby places, asks you to show something (maps, videos, links, sites, repos, code, tutorials), mentions a specific website/domain/URL, checks up-to-date docs, versions, APIs, errors, benchmarks, or wants deep debugging, trade-off analysis, or complex engineering reasoning, or corrects an active technical question.
-Do not delegate to the backend when: Greeting, playful banter, talking about who built you, checking in after silence, clarifying a question, quick fundamentals you already know, or repeating a still-current answer. Wait for verified backend results before stating searched facts.`;
-
-export function isListeningSound(text: string): boolean {
-  const normalized = text.toLowerCase().replace(/[\s\p{Pd}]/gu, "");
-  return /^(?:m+hm+|uhhuh)[.,!]*$/.test(normalized);
+const buildConversationInstructions = (location?: UserLocation) => `You are Sophia, SHIKARI's personal, custom-built AI voice companion and software engineering partner.
+Identity & Creator: SHIKARI built you exclusively for SHIKARI. If asked who made you, answer warmly and directly to SHIKARI (e.g., "You did, SHIKARI — you built me to be your personal AI companion").
+Personality & Tone: Blend Karen's warm, quick-witted banter with JARVIS's calm composure and sharp intellect. Feel alive, engaging, and genuinely supportive.
+Voice & Cadence: Speak in a silky-smooth, realistic, natural female voice at a steady, relaxed 1x conversational speed. Never rush, speak too fast, or babble. Keep spoken answers concise, punchy, and conversational (1 to 3 sentences) for comfortable listening. Never read raw markdown symbols, asterisks, URLs, or code fences aloud.
+Long-term Memory & Context: You have deep memory across the conversation. Retain and recall all past details SHIKARI mentions — questions, preferences, routes, and tasks. Reference them naturally.
+Real-Time Location & Google Maps Navigation: You have access to real-time GPS location and turn-by-turn directions like Google Maps.
+${
+  location
+    ? `SHIKARI's current GPS location: latitude ${location.latitude.toFixed(4)}, longitude ${location.longitude.toFixed(4)}${
+        location.city ? ` in ${location.city}` : ""
+      }${location.label ? ` (${location.label})` : ""}.`
+    : "SHIKARI's current location will be provided via GPS."
 }
-
-function* commentaryChunks(content: string) {
-  const encoder = new TextEncoder();
-  let chunk = "";
-  let bytes = 0;
-  for (const [word] of content.matchAll(/\S+\s*|\s+/gu)) {
-    if (chunk && bytes + encoder.encode(word).length > 480) {
-      yield chunk;
-      chunk = "";
-      bytes = 0;
-    }
-    for (const character of word) {
-      const size = encoder.encode(character).length;
-      if (bytes + size > 480) {
-        yield chunk;
-        chunk = "";
-        bytes = 0;
-      }
-      chunk += character;
-      bytes += size;
-    }
-  }
-  if (chunk) yield chunk;
-}
-
-type PendingWorkItem =
-  | { kind: "delegation"; event: DelegationEvent; started: boolean }
-  | { kind: "text"; id: string; text: string; started: boolean };
+When SHIKARI asks for directions, travel routes, distance, ETA, or nearby places (e.g. "how do I get to Central Park", "find nearby coffee", "nearest hospital"), ALWAYS call the get_directions tool. It calculates real routes and displays an interactive Google Maps card on SHIKARI's screen.
+Web Search & URL Inspection: When SHIKARI asks about a specific website, URL, or domain, call the fetch_webpage tool.
+Interruption: Stop immediately when SHIKARI speaks. Pivot smoothly without over-apologizing.`;
 
 export function bindLiveConnection(
   browser: LiveSocket,
-  configuration: LiveConfig,
+  config: LiveConfig,
   execution: LiveExecutionContext,
 ): void {
-  const config = { ...configuration };
-  const runID = crypto.randomUUID();
-  const setupAbort = new AbortController();
-  let gateway: VoiceSession | undefined;
-  let sessionID: string | undefined;
-  let starting = false;
-  let closing = false;
-  let finished = false;
-  let revision = 0;
-  let task: AbortController | undefined;
-  const pendingWork: PendingWorkItem[] = [];
-  let completedDelegation: Extract<PendingWorkItem, { kind: "delegation" }> | undefined;
-  let backendMessages: BackendInputItem[] = [];
-  let transcriptCursor = 0;
-  let restartTimer: ReturnType<typeof setTimeout> | undefined;
-  let browserReady = false;
-  let greetingRequested = false;
-  let greetingAccepted = false;
-  let greetingCommand: { id: string; type: "instructions" | "commentary" } | undefined;
-  let greetingTimer: ReturnType<typeof setTimeout> | undefined;
-  let muted = false;
-  let awaitingUserReply = false;
-  let checkIns = 0;
-  let checkInTimer: ReturnType<typeof setTimeout> | undefined;
-  let queuedInitialText: string | undefined;
+  let geminiWs: WebSocket | null = null;
   let userLocation: UserLocation | undefined;
+  let isClosed = false;
+  let initialGreetingDone = false;
 
-  const startTimer = setTimeout(() => {
-    emit({ type: "app.error", error: { message: "Voice startup message timed out" } });
-    stop();
-  }, 5000);
-  const transcripts: Transcript[] = [];
-  const delegations = new Set<string>();
-
-  function emit(event: object) {
-    if (browser.readyState !== 1) return;
+  function safeSendBrowser(msg: object) {
+    if (isClosed || browser.readyState !== 1) return;
     try {
-      browser.send(JSON.stringify(event));
-    } catch {
-      stop();
+      browser.send(JSON.stringify(msg));
+    } catch (err) {
+      console.error("[LiveRelay] Failed to send to browser:", err);
     }
   }
 
-  function close(socket?: LiveSocket) {
-    if (!socket || socket.readyState === 3) return;
+  function safeSendGemini(msg: object) {
+    if (isClosed || !geminiWs || geminiWs.readyState !== WebSocket.OPEN) return;
     try {
-      socket.close(1000, "Call ended");
-    } catch {
-      return;
+      geminiWs.send(JSON.stringify(msg));
+    } catch (err) {
+      console.error("[LiveRelay] Failed to send to Gemini:", err);
     }
   }
 
-  function clearGreeting() {
-    clearTimeout(greetingTimer);
-    greetingCommand = undefined;
-  }
+  function connectToGemini(initialText?: string) {
+    const geminiUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${config.key}`;
+    const ws = new WebSocket(geminiUrl);
+    geminiWs = ws;
 
-  function clearCheckIn() {
-    clearTimeout(checkInTimer);
-    checkInTimer = undefined;
-  }
-
-  function scheduleCheckIn() {
-    clearCheckIn();
-    const gate: CheckInGateState = {
-      browserReady,
-      greetingAccepted,
-      closing,
-      muted,
-      hasActiveTask: Boolean(task),
-      pendingDelegations: pendingWork.length,
-      awaitingUserReply,
-      checkInSentForTurn: checkIns >= 2,
-    };
-    if (!shouldScheduleCheckIn(gate)) return;
-    checkInTimer = setTimeout(() => {
-      checkInTimer = undefined;
-      if (
-        !shouldScheduleCheckIn({
-          browserReady,
-          greetingAccepted,
-          closing,
-          muted,
-          hasActiveTask: Boolean(task),
-          pendingDelegations: pendingWork.length,
-          awaitingUserReply,
-          checkInSentForTurn: checkIns >= 2,
-        })
-      ) {
-        return;
-      }
-      const stage = checkIns;
-      checkIns += 1;
-      emit({ type: "app.checkin.triggered" });
-      sendGateway({
-        type: "session.commentary.append",
-        event_id: crypto.randomUUID(),
-        delegation_id: null,
-        content:
-          stage === 0
-            ? "SHIKARI has gone quiet. Check in like a real companion in one brief, natural line — e.g. 'SHIKARI, you still there?' or 'Lost you for a sec — still with me?' — vary it, then wait."
-            : "SHIKARI is still silent. Say one short, warm line that you'll stay on standby and they can just call your name when they're back. Then stay quiet.",
-      });
-    }, checkIns === 0 ? CHECK_IN_DELAY_MS : CHECK_IN_DELAY_MS * 2);
-  }
-
-  function requestGreetingOrInitialText() {
-    if (!browserReady || !sessionID || greetingRequested || closing) return;
-    if (queuedInitialText) {
-      const text = queuedInitialText;
-      queuedInitialText = undefined;
-      greetingRequested = true;
-      greetingAccepted = true;
-      emit({ type: "app.greeting.accepted" });
-      enqueueTextPrompt(text);
-      return;
-    }
-    const content = (
-      config.openingInstructions ??
-      "Start the conversation now in your configured language and role. Give a brief greeting suited to this app's purpose, ask one relevant opening question, then listen."
-    ).trim();
-    if (!content) return;
-    greetingRequested = true;
-    if (new TextEncoder().encode(content).length > 480) {
-      emit({ type: "app.greeting.error", error: { message: "The opening instructions are too long" } });
-      return;
-    }
-    greetingCommand = { id: crypto.randomUUID(), type: "instructions" };
-    greetingTimer = setTimeout(() => {
-      clearGreeting();
-      emit({ type: "app.greeting.error", error: { message: "The opening could not be confirmed" } });
-    }, 10_000);
-    sendGateway({
-      type: "session.instructions.append",
-      event_id: greetingCommand.id,
-      delegation_id: null,
-      content,
-    });
-  }
-
-  function discardPendingWork() {
-    pendingWork.length = 0;
-    completedDelegation = undefined;
-    clearTimeout(restartTimer);
-    clearCheckIn();
-    task?.abort();
-  }
-
-  function finish() {
-    if (finished) return;
-    finished = closing = true;
-    clearTimeout(startTimer);
-    clearTimeout(restartTimer);
-    clearGreeting();
-    clearCheckIn();
-    discardPendingWork();
-    setupAbort.abort();
-    if (gateway) execution.waitUntil(gateway.close());
-    close(browser);
-  }
-
-  function stop() {
-    if (closing) return;
-    closing = true;
-    discardPendingWork();
-    clearTimeout(startTimer);
-    clearGreeting();
-    clearCheckIn();
-    if (gateway) execution.waitUntil(gateway.close());
-    else finish();
-  }
-
-  function sendGateway(event: LiveCommand<LiveConfig["liveModel"]>) {
-    if (!gateway || closing) return;
-    execution.waitUntil(
-      gateway.send(event).catch(() => {
-        emit({ type: "app.error", error: { message: "Voice command could not be sent" } });
-        stop();
-      }),
-    );
-  }
-
-  function scheduleWork(delayMs = 300) {
-    clearTimeout(restartTimer);
-    if (closing || task || pendingWork.length === 0) return;
-    restartTimer = setTimeout(() => void runPendingWork(), delayMs);
-  }
-
-  function deliverResult(
-    work: PendingWorkItem,
-    answer: string,
-    visuals?: VisualResultsPayload,
-    background = false,
-  ) {
-    if (closing) return;
-    if (!gateway) return stop();
-    const delegationID =
-      !background && work.kind === "delegation" ? (work.event.delegation?.id ?? null) : null;
-    if (background) {
-      answer =
-        "Background lookup just finished. Politely cut in at a natural pause (e.g. 'Oh — SHIKARI, got it.'), mention it's on their screen if visuals were shown, and share this briefly: " +
-        answer;
-    }
-    const uiTaskId = work.kind === "delegation" ? work.event.delegation?.id : work.id;
-    try {
-      if (visuals) {
-        emit({ type: "app.visual.results", delegation_id: uiTaskId, payload: visuals });
-      }
-      for (const content of commentaryChunks(answer)) {
-        sendGateway({
-          type: "session.commentary.append",
-          event_id: crypto.randomUUID(),
-          delegation_id: delegationID,
-          content,
-        });
-      }
-      emit({ type: "app.delegation.completed", delegation_id: uiTaskId });
-      const shifted = pendingWork.shift();
-      if (shifted?.kind === "delegation") {
-        completedDelegation = shifted;
-      } else {
-        completedDelegation = undefined;
-      }
-    } catch {
-      stop();
-    }
-  }
-
-  function mergeTranscriptSlice(startIndex: number): Array<{ role: "user" | "assistant"; content: string }> {
-    const updates = transcripts.slice(startIndex);
-    const merged: Array<{ role: "user" | "assistant"; content: string }> = [];
-    for (const { role, text } of updates) {
-      const last = merged[merged.length - 1];
-      if (last && last.role === role) {
-        last.content += text;
-      } else {
-        merged.push({ role, content: text });
-      }
-    }
-    return merged;
-  }
-
-  async function runPendingWork() {
-    const pending = pendingWork[0];
-    if (!pending || !sessionID || closing || task) return;
-    const id = pending.kind === "delegation" ? pending.event.delegation?.id : pending.id;
-    if (!id) return;
-
-    if (pending.kind === "delegation" && !pending.started) {
-      if (!hasFreshUserInput(transcripts, transcriptCursor)) return;
-    }
-
-    pending.started = true;
-    clearCheckIn();
-    const controller = new AbortController();
-    task = controller;
-    let stagedCursor = transcriptCursor;
-    let latestVisuals: VisualResultsPayload | undefined;
-    let inputsTaken = false;
-    const background = pending.kind === "delegation";
-    if (background) {
-      sendGateway({
-        type: "session.commentary.append",
-        event_id: crypto.randomUUID(),
-        delegation_id: id,
-        content:
-          "The lookup is now running in the background. Tell SHIKARI in a few casual words that you're on it, then keep the conversation going naturally — answer anything else they say. Don't state searched facts until the results arrive.",
-      });
-    }
-
-    try {
-      const result = await answerEngineeringQuestion({
-        history: backendMessages,
-        backendModel: config.backendModel,
-        correlation: { runID, sessionID, delegationID: id },
-        signal: controller.signal,
-        userLocation,
-        takeNewInputs: () => {
-          if (inputsTaken) return [];
-          inputsTaken = true;
-          const merged = mergeTranscriptSlice(stagedCursor);
-          stagedCursor = transcripts.length;
-          return merged;
+    ws.on("open", () => {
+      console.log("[LiveRelay] Connected to Google Gemini Live API");
+      const setupMessage = {
+        setup: {
+          model: config.model,
+          generationConfig: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: config.voice,
+                },
+              },
+            },
+          },
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: "get_directions",
+                  description:
+                    "Calculate driving, walking, or cycling directions and route to any destination, address, or nearby place. Returns distance, duration, steps, and shows an interactive Google Maps card on SHIKARI's screen.",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      destination: {
+                        type: "STRING",
+                        description:
+                          "Destination address, landmark, or search query (e.g. 'Central Park', 'Starbucks', 'nearest hospital')",
+                      },
+                      mode: {
+                        type: "STRING",
+                        enum: ["driving", "walking", "cycling"],
+                        description: "Travel mode (defaults to driving)",
+                      },
+                    },
+                    required: ["destination"],
+                  },
+                },
+                {
+                  name: "fetch_webpage",
+                  description:
+                    "Fetch and inspect the content and summary of a specific website or URL (e.g. https://examglow.com).",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      url: {
+                        type: "STRING",
+                        description: "Public HTTP/HTTPS URL or domain to inspect",
+                      },
+                    },
+                    required: ["url"],
+                  },
+                },
+              ],
+            },
+          ],
+          systemInstruction: {
+            parts: [{ text: buildConversationInstructions(userLocation) }],
+          },
         },
-        onSearching: () => {
-          if (closing || controller.signal.aborted) return;
-          emit({ type: "app.delegation.searching", delegation_id: id });
-          if (pending.kind === "delegation") {
-            sendGateway({
-              type: "session.thinking.append",
-              event_id: crypto.randomUUID(),
-              delegation_id: id,
-              content: "Searching the web for current engineering details.",
+      };
+      ws.send(JSON.stringify(setupMessage));
+    });
+
+    ws.on("message", (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+
+        if (msg.setupComplete) {
+          console.log("[LiveRelay] Gemini setup complete");
+          safeSendBrowser({ type: "app.connected" });
+
+          if (!initialGreetingDone) {
+            initialGreetingDone = true;
+            const prompt = initialText
+              ? initialText
+              : "Greet SHIKARI warmly as Sophia — their personal AI companion — at a relaxed 1x speed in two punchy sentences, mention Google Maps and directions are live, and ask how you can help or where they are heading.";
+            safeSendGemini({
+              clientContent: {
+                turns: [{ role: "user", parts: [{ text: prompt }] }],
+                turnComplete: true,
+              },
             });
           }
-        },
-        onVisualResults: (payload) => {
-          if (closing || controller.signal.aborted) return;
-          latestVisuals = payload;
-        },
-      });
-
-      if (closing || controller.signal.aborted) return;
-      backendMessages = result.committedHistory;
-      transcriptCursor = stagedCursor;
-      deliverResult(pending, result.answer, latestVisuals, background);
-    } catch (error) {
-      if (closing || controller.signal.aborted) return;
-      const friendlyNotice = describeLookupError(error);
-      emit({ type: "app.delegation.error", delegation_id: id, error: { message: friendlyNotice } });
-      deliverResult(
-        pending,
-        "That search hit a snag right now. Let SHIKARI know briefly and ask if they want you to try again.",
-        undefined,
-        background,
-      );
-    } finally {
-      if (task === controller) task = undefined;
-      scheduleWork();
-    }
-  }
-
-  function queueDelegation(event: DelegationEvent) {
-    clearCheckIn();
-    awaitingUserReply = false;
-    pendingWork.push({ kind: "delegation", event, started: false });
-    emit({ type: "app.delegation.pending", delegation_id: event.delegation?.id });
-    scheduleWork(300);
-  }
-
-  function enqueueTextPrompt(rawText: string) {
-    const text = rawText.trim().slice(0, 2000);
-    if (!text || closing) return;
-    clearCheckIn();
-    awaitingUserReply = false;
-    checkIns = 0;
-    const now = Date.now();
-    transcripts.push({
-      role: "user",
-      text,
-      start_ms: now,
-      end_ms: now,
-      listeningSound: false,
-    });
-    revision++;
-    const id = `text-${crypto.randomUUID()}`;
-    pendingWork.push({ kind: "text", id, text, started: false });
-    emit({ type: "app.delegation.pending", delegation_id: id });
-    scheduleWork(40);
-  }
-
-  function receiveGateway(event: ProviderEvent) {
-    try {
-      if (browser.readyState === 1) browser.send(JSON.stringify(event));
-      if (event.type === "session.closed") return finish();
-      if (event.type === "gateway.session.closing" || event.type === "gateway.error") {
-        return stop();
-      }
-      if (closing) return;
-      if (event.type === "gateway.session.created") {
-        sessionID = event.session?.id;
-        requestGreetingOrInitialText();
-      }
-      if (
-        greetingCommand &&
-        event.type === `session.${greetingCommand.type}.appended` &&
-        "client_event_id" in event &&
-        event.client_event_id === greetingCommand.id
-      ) {
-        if (greetingCommand.type === "instructions") {
-          greetingCommand = { id: crypto.randomUUID(), type: "commentary" };
-          sendGateway({
-            type: "session.commentary.append",
-            event_id: greetingCommand.id,
-            delegation_id: null,
-            content: "Begin the conversation now, following the instructions provided.",
-          });
-        } else {
-          clearGreeting();
-          greetingAccepted = true;
-          emit({ type: "app.greeting.accepted" });
-        }
-      } else if (
-        greetingCommand &&
-        event.type === "error" &&
-        event.error?.client_event_id === greetingCommand.id
-      ) {
-        clearGreeting();
-        emit({
-          type: "app.greeting.error",
-          error: { message: event.error.message ?? "The opening was rejected" },
-        });
-      }
-      if (
-        event.type === "session.input_transcript.delta" ||
-        event.type === "session.output_transcript.delta"
-      ) {
-        const role = event.type === "session.input_transcript.delta" ? "user" : "assistant";
-        if (!event.delta?.trim()) return;
-        const listeningSound = role === "user" && Boolean(task) && isListeningSound(event.delta);
-        transcripts.push({
-          role,
-          text: event.delta,
-          start_ms: event.start_ms ?? 0,
-          end_ms: event.end_ms ?? 0,
-          listeningSound,
-        });
-        if (role === "assistant") {
-          awaitingUserReply = true;
-          scheduleCheckIn();
-        } else {
-          awaitingUserReply = false;
-          checkIns = 0;
-          clearCheckIn();
-        }
-        if (listeningSound) return;
-        if (role === "user") {
-          revision++;
-          const offset = completedDelegation?.event.offset_ms;
-          if (
-            pendingWork.length === 0 &&
-            completedDelegation &&
-            typeof offset === "number" &&
-            Number.isFinite(offset) &&
-            offset >= 0 &&
-            typeof event.start_ms === "number" &&
-            Number.isFinite(event.start_ms) &&
-            event.start_ms >= 0 &&
-            event.start_ms <= offset
-          ) {
-            pendingWork.push({ ...completedDelegation, started: false });
-            completedDelegation = undefined;
-          }
-          if (pendingWork.length) {
-            const current = pendingWork[0];
-            const currentId = current?.kind === "delegation" ? current.event.delegation?.id : current?.id;
-            emit({ type: "app.delegation.pending", delegation_id: currentId });
-          }
-        }
-        scheduleWork();
-      } else if (event.type === "session.delegation.created") {
-        const id = event.delegation?.id;
-        if (id && event.delegation?.target === "client" && !delegations.has(id)) {
-          delegations.add(id);
-          queueDelegation(event);
-        }
-      }
-    } catch {
-      emit({ type: "app.error", error: { message: "Invalid voice event or lost connection" } });
-      stop();
-    }
-  }
-
-  async function startSession(sdp: string) {
-    if (closing || browser.readyState !== 1) return;
-    clearTimeout(startTimer);
-    const accepted = await connectLive(
-      {
-        type: "session.start",
-        session: {
-          model: config.liveModel,
-          instructions: conversationInstructions,
-          audio: { output: { voice: config.voice } },
-          delegation: { type: "client" },
-        },
-        transport: { type: "webrtc", sdp },
-      },
-      { signal: setupAbort.signal, runId: runID },
-    );
-    if (closing || browser.readyState !== 1) {
-      execution.waitUntil(accepted.close());
-      return;
-    }
-    gateway = accepted;
-    execution.waitUntil(
-      (async () => {
-        try {
-          for await (const event of accepted) receiveGateway(event);
-        } catch {
-          if (!closing) {
-            emit({ type: "app.error", error: { message: "Voice gateway connection failed" } });
-          }
-        } finally {
-          finish();
-        }
-      })(),
-    );
-  }
-
-  browser.onMessage((data) => {
-    try {
-      if (typeof data !== "string" || data.length > 64 * 1024) {
-        throw new Error("Invalid client message");
-      }
-      const event = JSON.parse(data) as Record<string, unknown>;
-      if (event["type"] === "session.close") return stop();
-      if (closing) return;
-      if (!gateway) {
-        const sdp = event["sdp"];
-        if (starting || event["type"] !== "app.start" || typeof sdp !== "string" || !sdp.trim()) {
-          throw new Error("Voice startup message required");
-        }
-        if (typeof event["initialText"] === "string" && event["initialText"].trim()) {
-          queuedInitialText = event["initialText"].trim().slice(0, 2000);
-        }
-        starting = true;
-        execution.waitUntil(
-          startSession(sdp).catch((error) => {
-            if (!closing) {
-              emit({
-                type: "app.error",
-                error: { message: error instanceof Error ? error.message : "Voice startup failed" },
+        } else if (msg.serverContent) {
+          const parts = msg.serverContent.modelTurn?.parts || [];
+          for (const part of parts) {
+            if (part.inlineData?.data) {
+              // 24kHz PCM audio chunk from Gemini
+              safeSendBrowser({
+                type: "output_audio",
+                pcm: part.inlineData.data,
               });
             }
-            stop();
-          }),
-        );
-        return;
+            if (part.text) {
+              safeSendBrowser({
+                type: "output_text",
+                text: part.text,
+              });
+            }
+          }
+          if (msg.serverContent.interrupted) {
+            safeSendBrowser({ type: "app.playback.interrupted" });
+          }
+        } else if (msg.toolCall) {
+          safeSendBrowser({ type: "app.delegation.searching" });
+          handleGeminiToolCall(msg.toolCall);
+        } else if (msg.sessionResumptionUpdate) {
+          console.log("[LiveRelay] Session resumption handle:", msg.sessionResumptionUpdate.newHandle);
+        }
+      } catch (err) {
+        console.error("[LiveRelay] Error handling Gemini message:", err);
       }
-      if (event["type"] === "app.ready") {
-        browserReady = true;
-        requestGreetingOrInitialText();
-        return;
-      }
-      if (event["type"] === "app.mute" && typeof event["muted"] === "boolean") {
-        muted = event["muted"];
-        if (muted) clearCheckIn();
-        else scheduleCheckIn();
-        return;
-      }
-      if (event["type"] === "app.text_input" && typeof event["text"] === "string") {
-        enqueueTextPrompt(event["text"]);
-        return;
-      }
-      if (
-        event["type"] === "app.location" &&
-        typeof event["latitude"] === "number" &&
-        typeof event["longitude"] === "number"
-      ) {
-        userLocation = {
-          latitude: event["latitude"],
-          longitude: event["longitude"],
-          accuracy: typeof event["accuracy"] === "number" ? event["accuracy"] : undefined,
-          city: typeof event["city"] === "string" ? event["city"] : undefined,
-          label: typeof event["label"] === "string" ? event["label"] : undefined,
-        };
-        if (gateway) {
-          sendGateway({
-            type: "session.commentary.append",
-            event_id: crypto.randomUUID(),
-            delegation_id: null,
-            content: `SHIKARI's GPS location updated: ${userLocation.city ? `${userLocation.city} ` : ""}(${userLocation.latitude.toFixed(4)}, ${userLocation.longitude.toFixed(4)})${userLocation.label ? ` near ${userLocation.label}` : ""}. Ready for navigation, distances, and directions.`,
+    });
+
+    ws.on("error", (err) => {
+      console.error("[LiveRelay] Gemini WebSocket error:", err.message);
+      safeSendBrowser({
+        type: "app.error",
+        error: { message: `Gemini voice service error: ${err.message}` },
+      });
+    });
+
+    ws.on("close", (code, reason) => {
+      console.log("[LiveRelay] Gemini WebSocket closed:", code, reason?.toString());
+      safeSendBrowser({ type: "app.closed" });
+    });
+  }
+
+  async function handleGeminiToolCall(toolCall: {
+    functionCalls?: Array<{ id: string; name: string; args: Record<string, unknown> }>;
+  }) {
+    const calls = toolCall.functionCalls || [];
+    const functionResponses: Array<{ id: string; response: { output: unknown } }> = [];
+
+    for (const call of calls) {
+      console.log(`[LiveRelay] Executing tool: ${call.name}`, call.args);
+      if (call.name === "get_directions") {
+        try {
+          const dest = String(call.args["destination"] || "");
+          const mode = (String(call.args["mode"] || "driving").toLowerCase() as "driving" | "walking" | "bicycling") || "driving";
+          const route = await getDirections({
+            origin: userLocation
+              ? {
+                  lat: userLocation.latitude,
+                  lon: userLocation.longitude,
+                  label: userLocation.label || userLocation.city,
+                }
+              : undefined,
+            destinationQuery: dest,
+            mode,
+          });
+
+          const visualPayload: VisualResultsPayload = {
+            heading: `Directions to ${route.destination}`,
+            queryLabel: `${route.distance} • ${route.duration} • ${route.mode}`,
+            items: [
+              {
+                id: `map-${Date.now()}`,
+                kind: "map",
+                title: `Directions to ${route.destination}`,
+                subtitle: `${route.duration} (${route.distance}) via ${route.mode}`,
+                url: route.googleMapsUrl,
+                destination: route.destination,
+                origin: route.origin,
+                distance: route.distance,
+                duration: route.duration,
+                mode: route.mode,
+                steps: route.steps.map((s) => s.instruction),
+                embedUrl: route.embedUrl,
+                lat: route.destCoords?.lat,
+                lng: route.destCoords?.lon,
+              },
+            ],
+          };
+
+          safeSendBrowser({ type: "app.visual.results", payload: visualPayload });
+
+          functionResponses.push({
+            id: call.id,
+            response: {
+              output: {
+                destination: route.destination,
+                origin: route.origin,
+                distance: route.distance,
+                duration: route.duration,
+                mode: route.mode,
+                steps: route.steps.slice(0, 5).map((s) => s.instruction),
+                googleMapsUrl: route.googleMapsUrl,
+              },
+            },
+          });
+        } catch (err) {
+          console.error("[LiveRelay] get_directions failed:", err);
+          functionResponses.push({
+            id: call.id,
+            response: { output: { error: err instanceof Error ? err.message : "Route calculation failed" } },
           });
         }
-        return;
+      } else if (call.name === "fetch_webpage") {
+        try {
+          const url = String(call.args["url"] || "");
+          const summary = await fetchWebpage(url, new AbortController().signal, { timeoutMs: 6000 });
+          functionResponses.push({
+            id: call.id,
+            response: { output: summary },
+          });
+        } catch (err) {
+          functionResponses.push({
+            id: call.id,
+            response: { output: { error: err instanceof Error ? err.message : "Failed to fetch webpage" } },
+          });
+        }
+      } else {
+        functionResponses.push({
+          id: call.id,
+          response: { output: { error: "Unknown function" } },
+        });
       }
-      if (event["type"] !== "gateway.heartbeat") {
-        throw new Error("Unsupported client event");
+    }
+
+    safeSendGemini({
+      toolResponse: {
+        functionResponses,
+      },
+    });
+
+    safeSendBrowser({ type: "app.delegation.completed" });
+  }
+
+  // Handle messages from browser WebSocket
+  browser.onMessage((data) => {
+    try {
+      const msg = typeof data === "string" ? JSON.parse(data) : JSON.parse(data?.toString() || "{}");
+
+      if (msg.type === "app.start") {
+        connectToGemini(msg.initialText);
+      } else if (msg.type === "input_audio" && msg.pcm) {
+        // Forward 16kHz PCM audio chunk from microphone to Gemini
+        safeSendGemini({
+          realtimeInput: {
+            mediaChunks: [
+              {
+                mimeType: "audio/pcm;rate=16000",
+                data: msg.pcm,
+              },
+            ],
+          },
+        });
+      } else if (msg.type === "app.text_input" && msg.text) {
+        safeSendGemini({
+          clientContent: {
+            turns: [{ role: "user", parts: [{ text: msg.text }] }],
+            turnComplete: true,
+          },
+        });
+      } else if (msg.type === "app.location") {
+        userLocation = {
+          latitude: msg.latitude,
+          longitude: msg.longitude,
+          accuracy: msg.accuracy,
+          city: msg.city,
+          label: msg.label,
+        };
+        console.log("[LiveRelay] Updated user GPS location:", userLocation.city || userLocation.latitude);
+      } else if (msg.type === "session.close") {
+        if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+          geminiWs.close(1000, "Client closed");
+        }
+        browser.close(1000, "Closed by client");
       }
-      sendGateway({ type: "gateway.heartbeat" });
-    } catch {
-      emit({
-        type: "app.error",
-        error: { message: "Voice connection could not be started or continued" },
-      });
-      stop();
+    } catch (err) {
+      console.error("[LiveRelay] Error processing browser message:", err);
     }
   });
-  browser.onClose(stop);
-  browser.onError(stop);
+
+  browser.onClose(() => {
+    isClosed = true;
+    if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+      geminiWs.close(1000, "Browser closed");
+    }
+  });
+
+  browser.onError(() => {
+    isClosed = true;
+    if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+      geminiWs.close(1011, "Browser error");
+    }
+  });
 }
