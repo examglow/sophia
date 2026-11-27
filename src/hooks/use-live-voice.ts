@@ -278,6 +278,63 @@ function createLiveVoice(options: LiveOptions) {
     }
   }
 
+  function playAudioBuffer(audioBuffer: AudioBuffer) {
+    if (!audioCtx) return;
+    try {
+      const source = audioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.playbackRate.value = 1.0;
+
+      if (outputAnalyser) {
+        source.connect(outputAnalyser);
+        outputAnalyser.connect(audioCtx.destination);
+      } else {
+        source.connect(audioCtx.destination);
+      }
+
+      const currentTime = audioCtx.currentTime;
+      const isStartingTurn = activeSources.length === 0 && scheduledPlaybackTime <= currentTime;
+
+      if (isStartingTurn) {
+        scheduledPlaybackTime = currentTime + 0.05;
+      } else if (scheduledPlaybackTime < currentTime) {
+        scheduledPlaybackTime = currentTime + 0.01;
+      }
+
+      source.start(scheduledPlaybackTime);
+      scheduledPlaybackTime += audioBuffer.duration;
+
+      activeSources.push(source);
+      source.onended = () => {
+        activeSources = activeSources.filter((s) => s !== source);
+      };
+    } catch (err) {
+      console.error("[AudioPlayback] Error playing AudioBuffer:", err);
+    }
+  }
+
+  function playAudioChunk(base64Audio: string) {
+    if (!audioCtx) return;
+    try {
+      if (audioCtx.state === "suspended") {
+        void audioCtx.resume().catch(() => {});
+      }
+      const bytes = base64ToUint8(base64Audio);
+      const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      audioCtx.decodeAudioData(
+        copy,
+        (buffer) => {
+          playAudioBuffer(buffer);
+        },
+        (err) => {
+          console.error("[AudioPlayback] decodeAudioData error:", err);
+        },
+      );
+    } catch (err) {
+      console.error("[AudioPlayback] playAudioChunk failed:", err);
+    }
+  }
+
   function playPcmChunk(base64Pcm: string) {
     if (!audioCtx) return;
     try {
@@ -563,8 +620,12 @@ function createLiveVoice(options: LiveOptions) {
           if (event.type === "app.connected") {
             state = "active";
             options.onEvent({ type: "app.connected" });
-          } else if (event.type === "output_audio" && typeof event.pcm === "string") {
-            playPcmChunk(event.pcm);
+          } else if (event.type === "output_audio") {
+            if (typeof event.audio === "string") {
+              playAudioChunk(event.audio);
+            } else if (typeof event.pcm === "string") {
+              playPcmChunk(event.pcm);
+            }
           } else if (event.type === "app.playback.interrupted") {
             stopAllPlayback();
           } else if (event.type === "app.visual.results") {
